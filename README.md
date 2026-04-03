@@ -1,5 +1,13 @@
 # VEX AIM Librarian
 
+## Running with vex-aim-tools (stock)
+
+Add both repos to `PYTHONPATH` (parent folder or each repo path). Programs should call `install_librarian_extensions(robot)` once per run after `StateMachineProgram.__init__` and before `start()` (see `navigate_to_marker/NavigateToMarker.py`). Book logic and 3D QML live under `aim_librarian/`; **do not** fork book changes into `vex-aim-tools`.
+
+`export PYTHONPATH="/Users/tsumacpro/CogRob/vex-aim-tools:/Users/tsumacpro/CogRob/vex-aim-librarian${PYTHONPATH:+:$PYTHONPATH}"`
+
+**Quick demo:** from `simple_cli`, run `runfsm('BooksIdleDemo')` to open the map + camera and ingest spine markers (ArUco id ≥ 9) as books while idle.
+
 ## Features (depth-first)
 
 - Scan book spines

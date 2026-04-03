@@ -1,0 +1,51 @@
+"""
+Navigate to an ArUco marker using ``PilotToArucoMarker`` / ``PilotToPose`` (RRT).
+
+Requires ``aim_fsm`` on ``PYTHONPATH`` (the ``vex-aim-tools`` repo). Edit this FSM in
+``NavigateToMarker.fsm`` and regenerate Python with::
+
+    python3 path/to/vex-aim-tools/genfsm NavigateToMarker.fsm NavigateToMarker.py
+"""
+
+from aim_fsm import *
+
+class NavigateToMarker(StateMachineProgram):
+
+    def __init__(self, marker_id=9, **kwargs):
+        self.marker_id = marker_id
+        opts = dict(
+            speech=False,
+            launch_path_viewer=True,
+        )
+        opts.update(kwargs)
+        super().__init__(**opts)
+
+    class NavDonePrint(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            print(
+                'NavigateToMarker: completed run toward marker',
+                self.parent.marker_id,
+            )
+            self.post_completion()
+
+    class NavFailPrint(StateNode):
+        def start(self, event=None):
+            super().start(event)
+            print(
+                'NavigateToMarker: failed for marker',
+                self.parent.marker_id,
+            )
+            self.post_completion()
+
+    $setup{
+        travel: PilotToArucoMarker(self.marker_id)
+        travel =C=> ok
+        travel =F=> bad
+
+        ok: self.NavDonePrint() =N=> done
+
+        bad: self.NavFailPrint() =N=> done
+
+        done: ParentCompletes()
+    }

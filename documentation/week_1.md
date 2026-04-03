@@ -9,3 +9,8 @@
     - Put a small bolt in the bottom for weight, and weights
   - 
 
+## Day 1: 
+ - Created the above plan, and the above design systems
+## Day 2: 
+ - Create navigate to marker!
+ - Using paper prototype of book to test program
