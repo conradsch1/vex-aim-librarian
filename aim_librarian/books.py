@@ -11,9 +11,9 @@ BOOK_FIRST_ID = 9
 class BookObj(WorldObject):
     """1.5\" × 2.5\" × 0.5\" prism; marker on spine (viewer: ±Y faces)."""
 
-    SPINE_THICKNESS_MM = 0.5 * _MM_PER_INCH
-    COVER_WIDTH_MM = 1.5 * _MM_PER_INCH
-    HEIGHT_MM = 2.5 * _MM_PER_INCH
+    SPINE_THICKNESS_MM = 1 * _MM_PER_INCH
+    COVER_WIDTH_MM = 3 * _MM_PER_INCH
+    HEIGHT_MM = 4 * _MM_PER_INCH
 
     def __init__(self, spec, x=0, y=0, z=0, theta=0, **kwargs):
         super().__init__(x=x, y=y, z=z, theta=theta, **kwargs)
