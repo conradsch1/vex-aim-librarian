@@ -61,7 +61,9 @@ def _replace_stock_worldmap_viewer(robot: Any, LibrarianWorldMapViewer: type) ->
 
 __all__ = [
     "BOOK_FIRST_ID",
+    "BOOK_LAST_ID",
     "BookObj",
+    "is_book_aruco_id",
     "PilotToArucoMarker",
     "install_librarian_extensions",
 ]
@@ -95,6 +97,14 @@ def install_librarian_extensions(robot: Any, *, skip_viewer_bindings: bool = Fal
 def __getattr__(name: str):
     if name == "BOOK_FIRST_ID":
         from aim_librarian.books import BOOK_FIRST_ID as v
+
+        return v
+    if name == "BOOK_LAST_ID":
+        from aim_librarian.books import BOOK_LAST_ID as v
+
+        return v
+    if name == "is_book_aruco_id":
+        from aim_librarian.books import is_book_aruco_id as v
 
         return v
     if name == "BookObj":

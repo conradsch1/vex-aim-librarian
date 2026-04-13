@@ -6,7 +6,7 @@ Add both repos to `PYTHONPATH` (parent folder or each repo path). Programs shoul
 
 `export PYTHONPATH="/Users/tsumacpro/CogRob/vex-aim-tools:/Users/tsumacpro/CogRob/vex-aim-librarian${PYTHONPATH:+:$PYTHONPATH}"`
 
-**Quick demo:** from `simple_cli`, run `runfsm('BooksIdleDemo')` to open the map + camera and ingest spine markers (ArUco id ≥ 9) as books while idle.
+**Quick demo:** from `simple_cli`, run `runfsm('BooksIdleDemo')` to open the map + camera and ingest spine markers (ArUco ids 9–15) as books while idle.
 
 ## Features (depth-first)
 
@@ -29,3 +29,6 @@ Add both repos to `PYTHONPATH` (parent folder or each repo path). Programs shoul
 - [ ] Algorithm: swap two books
 - [ ] Algorithm: sort stack of books
 - [ ] GPT-4o integration — scope and UX (replace placeholder notes)
+
+
+Robot AIM-2A81818 has a well-positioned magnet.

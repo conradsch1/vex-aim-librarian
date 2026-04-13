@@ -1,4 +1,4 @@
-"""PilotGoal node for navigating to an ArUco marker / librarian Book (id >= BOOK_FIRST_ID)."""
+"""PilotGoal node for navigating to an ArUco marker / librarian Book (book id range)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from aim_fsm.pilot import PilotToPose
 from aim_fsm.utils import Pose
 from aim_fsm.worldmap import ArucoMarkerObj, WorldObject
 
-from aim_librarian.books import BOOK_FIRST_ID, BookObj
+from aim_librarian.books import BookObj, is_book_aruco_id
 
 
 class PilotToArucoMarker(PilotToPose):
@@ -31,7 +31,7 @@ class PilotToArucoMarker(PilotToPose):
         theta_robot = self.robot.pose.theta
         x = self.robot.pose.x + sensor_distance * cos(theta_robot + sensor_bearing)
         y = self.robot.pose.y + sensor_distance * sin(theta_robot + sensor_bearing)
-        if self.marker_id >= BOOK_FIRST_ID:
+        if is_book_aruco_id(self.marker_id):
             z = BookObj.HEIGHT_MM / 2
         else:
             z = marker.aruco_parent.marker_size / 2

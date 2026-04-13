@@ -1,7 +1,7 @@
 """
 Navigate to an ArUco marker using ``PilotToArucoMarker`` / ``PilotToPose`` (RRT).
 
-Book markers (ArUco id >= ``BOOK_FIRST_ID``) and 3D book view live in ``aim_librarian``;
+Book markers (ArUco ids in ``BOOK_FIRST_ID``…``BOOK_LAST_ID``) and 3D book view live in ``aim_librarian``;
 ``vex-aim-tools`` stays unmodified.
 
 Requires ``vex-aim-tools`` and this repo on ``PYTHONPATH``. Edit ``NavigateToMarker.fsm`` and regenerate with::

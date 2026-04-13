@@ -4,8 +4,13 @@ from aim_fsm.worldmap import WorldObject
 
 _MM_PER_INCH = 25.4
 
-# ArUco IDs >= BOOK_FIRST_ID_MS are modeled as books unless you change routing in worldmap_ext.
+# ArUco IDs in [BOOK_FIRST_ID, BOOK_LAST_ID] are modeled as books; see worldmap_ext.
 BOOK_FIRST_ID = 9
+BOOK_LAST_ID = 15
+
+
+def is_book_aruco_id(marker_id: int) -> bool:
+    return BOOK_FIRST_ID <= marker_id <= BOOK_LAST_ID
 
 
 class BookObj(WorldObject):
@@ -39,4 +44,4 @@ class BookObj(WorldObject):
         return f"<BookObj {self.marker_id}: position unknown>"
 
 
-__all__ = ["BookObj", "BOOK_FIRST_ID"]
+__all__ = ["BookObj", "BOOK_FIRST_ID", "BOOK_LAST_ID", "is_book_aruco_id"]

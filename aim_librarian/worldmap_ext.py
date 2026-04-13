@@ -1,4 +1,4 @@
-"""Librarian WorldMap: ArUco ids >= BOOK_FIRST_ID become BookObj."""
+"""Librarian WorldMap: ArUco ids in the book range become BookObj."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from aim_fsm.worldmap import (
 from aim_fsm.utils import Pose
 from aim_fsm.geometry import wrap_angle
 
-from aim_librarian.books import BookObj, BOOK_FIRST_ID
+from aim_librarian.books import BookObj, is_book_aruco_id
 
 
 class LibrarianWorldMap(WorldMap):
@@ -28,7 +28,7 @@ class LibrarianWorldMap(WorldMap):
         else:
             seen_markers = detector.seen_marker_objects.copy()
         for id, marker in seen_markers.items():
-            if id >= BOOK_FIRST_ID:
+            if is_book_aruco_id(id):
                 name = f"Book-{id}"
                 spec = {"name": name, "id": id, "marker": marker}
                 obj = BookObj(spec)

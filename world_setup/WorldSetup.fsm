@@ -1,0 +1,71 @@
+"""
+Librarian field: two ArUco reference markers relative to the robot start pose.
+
+Physical layout (inches): lateral offset ±3.5 in, forward offset 6.5 in from start.
+In the AIM world frame used here, that is (±x, y) = (±3.5, 6.5) in inches converted to mm.
+
+The markers sit on the side **opposite the camera** from an earlier ArUco placement: the
+forward component is negated so the markers are **behind** the robot (camera looks toward
++y at heading 0 in this convention; markers are at y = -6.5 in).
+
+**ArUco ids 19 and 20** (OpenCV dictionary on the field), not VEX AprilTag/AIV ``tag`` objects.
+World objects are ``ArucoMarkerObj``. The particle viewer lists fixed landmark poses;
+measurement updates use the configured sensor model (not ``ArucoDistanceSensorModel`` here).
+
+**id 20** is placed as the reference. **id 19** shares the same **y** as id 20 and lies **to the left on x** (smaller world ``x``, separated by ``2 * _TAG_X`` ≈ 7\").
+
+Regenerate Python with::
+
+    python3 path/to/vex-aim-tools/genfsm WorldSetup.fsm WorldSetup.py
+"""
+
+from aim_fsm import *
+from aim_fsm.particle import SensorModel
+
+# inches -> mm (world uses mm like Lab3a)
+_IN = 25.4
+_TAG_X = 3.5 * _IN   # 88.9 mm  lateral
+_TAG_Y = 6.5 * _IN   # 165.1 mm forward magnitude (placed at -_TAG_Y for camera-opposite side)
+
+
+class ArucoLandmarkHolder(SensorModel):
+    """Fixed landmark poses for the particle landmark list; no live PF measurement updates."""
+
+    def evaluate(self, particles, force=False):
+        return False
+
+
+class WorldSetup(StateMachineProgram):
+    def __init__(self):
+        landmarks = {
+            'ArucoMarker-19': Pose(-_TAG_X, -_TAG_Y + 2 * _TAG_X, 0, pi / 2),
+            'ArucoMarker-20': Pose(-_TAG_X, -_TAG_Y, 0, pi / 2),
+        }
+        pf = ParticleFilter(
+            robot,
+            num_particles=500,
+            landmarks=landmarks,
+            sensor_model=ArucoLandmarkHolder,
+        )
+        
+        super().__init__(
+            particle_filter=pf,
+            wall_marker_dict=None,
+            speech=False,
+            launch_particle_viewer=True,
+        )
+
+    def start(self):
+
+        super().start()
+        # Same y as m20; id 19 is to the left on x (see module docstring).
+        m20 = ArucoMarkerObj({'name': 'ArucoMarker-20', 'id': 20, 'marker': None}, x=_TAG_Y, y=-_TAG_X, theta=pi / 2)
+        m19 = ArucoMarkerObj({'name': 'ArucoMarker-19', 'id': 19, 'marker': None}, x=_TAG_Y - 2 * _TAG_X, y=-_TAG_X, theta=pi / 2)
+        m19.is_fixed = True
+        m20.is_fixed = True
+        self.robot.world_map.objects['ArucoMarker-19.a'] = m19
+        self.robot.world_map.objects['ArucoMarker-20.a'] = m20
+
+    $setup{
+        done: ParentCompletes()
+    }
