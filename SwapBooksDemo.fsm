@@ -42,7 +42,7 @@ class SwapBooksDemo(StateMachineProgram):
 
     STAGING_OFFSET_Y_MM = 130.0
     ROBOT_STANDOFF_MM = 115.0
-    ENGAGE_MM = 42.0
+    ENGAGE_MM = 0.0
     RELEASE_BACK_MM = -38.0
 
     def __init__(self, book_id_a: int = BOOK_FIRST_ID, book_id_b: int = BOOK_FIRST_ID + 1, **kwargs):
