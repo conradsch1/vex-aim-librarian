@@ -39,10 +39,17 @@ class PilotToArucoMarker(PilotToPose):
         return Pose(x, y, z, heading)
 
     def _world_object_for_marker_id(self):
+        """Prefer :class:`BookObj` so path planning uses the book footprint, not a duplicate ArUco."""
+        book_obj = None
+        aruco_obj = None
         for obj in self.robot.world_map.objects.values():
-            if isinstance(obj, (ArucoMarkerObj, BookObj)) and obj.marker_id == self.marker_id:
-                return obj
-        return None
+            if obj.marker_id != self.marker_id:
+                continue
+            if isinstance(obj, BookObj):
+                book_obj = obj
+            elif isinstance(obj, ArucoMarkerObj):
+                aruco_obj = obj
+        return book_obj if book_obj is not None else aruco_obj
 
     def start(self, event=None):
         if isinstance(event, DataEvent):
@@ -76,4 +83,8 @@ class PilotToArucoMarker(PilotToPose):
         super(PilotToPose, self).start(event)
 
 
-__all__ = ["PilotToArucoMarker"]
+class PilotToBook(PilotToArucoMarker):
+    """Navigate using the :class:`BookObj` goal (same spine ArUco id); clearer name for swap demos."""
+
+
+__all__ = ["PilotToArucoMarker", "PilotToBook"]

@@ -65,6 +65,7 @@ __all__ = [
     "BookObj",
     "is_book_aruco_id",
     "PilotToArucoMarker",
+    "PilotToBook",
     "install_librarian_extensions",
 ]
 
@@ -113,6 +114,10 @@ def __getattr__(name: str):
         return v
     if name == "PilotToArucoMarker":
         from aim_librarian.pilot_ext import PilotToArucoMarker as v
+
+        return v
+    if name == "PilotToBook":
+        from aim_librarian.pilot_ext import PilotToBook as v
 
         return v
     raise AttributeError(name)

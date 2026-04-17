@@ -19,6 +19,8 @@ class BookObj(WorldObject):
     SPINE_THICKNESS_MM = 1 * _MM_PER_INCH
     COVER_WIDTH_MM = 3 * _MM_PER_INCH
     HEIGHT_MM = 4 * _MM_PER_INCH
+    # Used by ``WorldMap.update_held_object`` when the librarian marks this book as held.
+    diameter = COVER_WIDTH_MM
 
     def __init__(self, spec, x=0, y=0, z=0, theta=0, **kwargs):
         super().__init__(x=x, y=y, z=z, theta=theta, **kwargs)

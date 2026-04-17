@@ -1,0 +1,242 @@
+"""
+Physically swap two books (magnet + navigation).
+
+Assumes spine ArUco ids ``BOOK_FIRST_ID`` and ``BOOK_FIRST_ID+1``, **localized** SLAM, and
+markers visible when each ``PilotToBook`` runs. The robot: drives to each book,
+runs ``Forward`` into the shelf to engage the magnet, marks the book as held, navigates to a
+drop pose, backs off, and releases the book on the map at the target slot. **Tune**
+``ROBOT_STANDOFF_MM``, ``ENGAGE_MM``, and ``RELEASE_BACK_MM`` for your field and magnet.
+
+Field layout matches ``world_setup/WorldSetup.fsm``. Requires ``install_librarian_extensions``.
+
+From ``simple_cli``::
+
+    runfsm('SwapBooksDemo')
+
+Then type ``start`` or ``tm start``.
+
+Regenerate Python with::
+
+    python3 path/to/vex-aim-tools/genfsm SwapBooksDemo.fsm SwapBooksDemo.py
+"""
+
+from __future__ import annotations
+
+from math import nan, pi
+
+from aim_fsm import *
+from aim_fsm.particle import ArucoCombinedSensorModel
+
+from aim_librarian import BookObj, BOOK_FIRST_ID, install_librarian_extensions
+from aim_librarian.book_manip import AttachBook, DetachBookAtPose
+from aim_librarian.pilot_ext import PilotToBook
+
+# Same field constants as ``world_setup/WorldSetup.fsm``
+_TAG_Y = 138
+_TAG_X = 175
+BOX_WIDTH = 35
+
+
+class SwapBooksDemo(StateMachineProgram):
+    """World setup + physical swap: pick A to staging, B to A's slot, A to B's slot."""
+
+    STAGING_OFFSET_Y_MM = 130.0
+    ROBOT_STANDOFF_MM = 115.0
+    ENGAGE_MM = 42.0
+    RELEASE_BACK_MM = -38.0
+
+    def __init__(self, book_id_a: int = BOOK_FIRST_ID, book_id_b: int = BOOK_FIRST_ID + 1, **kwargs):
+        self.book_id_a = book_id_a
+        self.book_id_b = book_id_b
+        z_book = BookObj.HEIGHT_MM / 2
+        shelf_x = _TAG_X - 45.0
+        self._pose0_a = Pose(shelf_x, 70.0, z_book, pi)
+        self._pose0_b = Pose(shelf_x, -70.0, z_book, pi)
+        self._pose_staging_a = Pose(
+            self._pose0_a.x,
+            self._pose0_a.y + self.STAGING_OFFSET_Y_MM,
+            self._pose0_a.z,
+            self._pose0_a.theta,
+        )
+        self._key_a = f"Book-{self.book_id_a}.a"
+        self._key_b = f"Book-{self.book_id_b}.a"
+
+        landmarks = {
+            "ArucoMarker-17": Pose(_TAG_X - BOX_WIDTH / 2, _TAG_Y, 5, pi / 2),
+            "ArucoMarker-18": Pose(_TAG_X - BOX_WIDTH / 2, -_TAG_Y, 5, 3 * pi / 2),
+            "ArucoMarker-19": Pose(_TAG_X, -_TAG_Y + BOX_WIDTH / 2, 5, pi),
+            "ArucoMarker-20": Pose(_TAG_X, _TAG_Y - BOX_WIDTH / 2, 5, pi),
+        }
+        pf = ParticleFilter(
+            robot,
+            num_particles=500,
+            landmarks=landmarks,
+            sensor_model=ArucoCombinedSensorModel,
+        )
+        opts = dict(
+            particle_filter=pf,
+            wall_marker_dict=None,
+            speech=False,
+            launch_particle_viewer=True,
+            launch_path_viewer=True,
+            launch_worldmap_viewer=True,
+            launch_cam_viewer=True,
+        )
+        opts.update(kwargs)
+        super().__init__(**opts)
+        install_librarian_extensions(self.robot)
+
+    def seed_world(self) -> None:
+        """Fixed ArUco landmarks and two books at distinct shelf poses."""
+        spec_a = {"name": f"Book-{self.book_id_a}", "id": self.book_id_a, "marker": None}
+        spec_b = {"name": f"Book-{self.book_id_b}", "id": self.book_id_b, "marker": None}
+        ba = BookObj(
+            spec_a,
+            x=self._pose0_a.x,
+            y=self._pose0_a.y,
+            z=self._pose0_a.z,
+            theta=self._pose0_a.theta,
+        )
+        bb = BookObj(
+            spec_b,
+            x=self._pose0_b.x,
+            y=self._pose0_b.y,
+            z=self._pose0_b.z,
+            theta=self._pose0_b.theta,
+        )
+        ba.is_visible = True
+        bb.is_visible = True
+
+        self.robot.world_map.objects[self._key_a] = ba
+        self.robot.world_map.objects[self._key_b] = bb
+
+        m17 = ArucoMarkerObj(
+            {"name": "ArucoMarker-17", "id": 17, "marker": None},
+            x=_TAG_X - BOX_WIDTH / 2,
+            y=_TAG_Y,
+            theta=pi / 2,
+        )
+        m18 = ArucoMarkerObj(
+            {"name": "ArucoMarker-18", "id": 18, "marker": None},
+            x=_TAG_X - BOX_WIDTH / 2,
+            y=-_TAG_Y,
+            theta=3 * pi / 2,
+        )
+        m17.is_fixed = True
+        m18.is_fixed = True
+        self.robot.world_map.objects["ArucoMarker-17.a"] = m17
+        self.robot.world_map.objects["ArucoMarker-18.a"] = m18
+        m19 = ArucoMarkerObj(
+            {"name": "ArucoMarker-19", "id": 19, "marker": None},
+            x=_TAG_X,
+            y=-_TAG_Y + BOX_WIDTH / 2,
+            theta=pi,
+        )
+        m20 = ArucoMarkerObj(
+            {"name": "ArucoMarker-20", "id": 20, "marker": None},
+            x=_TAG_X,
+            y=_TAG_Y - BOX_WIDTH / 2,
+            theta=pi,
+        )
+        m19.is_fixed = True
+        m20.is_fixed = True
+        self.robot.world_map.objects["ArucoMarker-19.a"] = m19
+        self.robot.world_map.objects["ArucoMarker-20.a"] = m20
+
+    def start(self):
+        self.seed_world()
+        super().start()
+
+    def _robot_goal_for_book(self, book_pose: Pose) -> Pose:
+        """Robot pose in front of the shelf slot ``book_pose``."""
+        return Pose(book_pose.x - self.ROBOT_STANDOFF_MM, book_pose.y, 0.0, nan)
+
+    $setup{
+        prompt: Print("SwapBooksDemo: LOCALIZED, cameras see spines. Type start — magnet swap runs.")
+        prompt =N=> wait
+
+        wait: StateNode()
+        wait =TM('^\\s*start\\s*$')=> p_a
+
+        p_a: PilotToBook(self.book_id_a)
+        p_a =C=> f_a
+        p_a =F=> fail
+
+        f_a: Forward(self.ENGAGE_MM)
+        f_a =C=> settle_a
+        f_a =F=> fail
+
+        settle_a: StateNode() =T(0.4)=> att_a
+
+        att_a: AttachBook(self.book_id_a)
+        att_a =C=> go_stg
+        att_a =F=> fail
+
+        go_stg: PilotToPose(self._robot_goal_for_book(self._pose_staging_a))
+        go_stg =C=> bk_a
+        go_stg =F=> fail
+
+        bk_a: Forward(self.RELEASE_BACK_MM)
+        bk_a =C=> drop_stg
+        bk_a =F=> fail
+
+        drop_stg: DetachBookAtPose(self._pose_staging_a)
+        drop_stg =C=> p_b
+        drop_stg =F=> fail
+
+        p_b: PilotToBook(self.book_id_b)
+        p_b =C=> f_b
+        p_b =F=> fail
+
+        f_b: Forward(self.ENGAGE_MM)
+        f_b =C=> settle_b
+        f_b =F=> fail
+
+        settle_b: StateNode() =T(0.4)=> att_b
+
+        att_b: AttachBook(self.book_id_b)
+        att_b =C=> go_a
+        att_b =F=> fail
+
+        go_a: PilotToPose(self._robot_goal_for_book(self._pose0_a))
+        go_a =C=> bk_b
+        go_a =F=> fail
+
+        bk_b: Forward(self.RELEASE_BACK_MM)
+        bk_b =C=> drop_b
+        bk_b =F=> fail
+
+        drop_b: DetachBookAtPose(self._pose0_a)
+        drop_b =C=> p_a2
+        drop_b =F=> fail
+
+        p_a2: PilotToBook(self.book_id_a)
+        p_a2 =C=> f_a2
+        p_a2 =F=> fail
+
+        f_a2: Forward(self.ENGAGE_MM)
+        f_a2 =C=> settle_a2
+        f_a2 =F=> fail
+
+        settle_a2: StateNode() =T(0.4)=> att_a2
+
+        att_a2: AttachBook(self.book_id_a)
+        att_a2 =C=> go_b
+        att_a2 =F=> fail
+
+        go_b: PilotToPose(self._robot_goal_for_book(self._pose0_b))
+        go_b =C=> bk_a2
+        go_b =F=> fail
+
+        bk_a2: Forward(self.RELEASE_BACK_MM)
+        bk_a2 =C=> drop_fin
+        bk_a2 =F=> fail
+
+        drop_fin: DetachBookAtPose(self._pose0_b)
+        drop_fin =C=> done
+        drop_fin =F=> fail
+
+        fail: Print("SwapBooksDemo: failed — localize, clear path, ensure markers in view. Tune ENGAGE_MM / standoff.") =N=> done
+
+        done: ParentCompletes()
+    }

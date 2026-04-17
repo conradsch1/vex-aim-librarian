@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from math import pi
+
+from aim_fsm.geometry import wrap_angle
 from aim_fsm.rrt import RRT
 from aim_fsm.worldmap import (
     BarrelObj,
@@ -25,13 +28,14 @@ def generate_book_obstacle(book, inflation=0):
     from aim_fsm import geometry
     from aim_fsm.rrt_shapes import Rectangle
 
+    # Match librarian WorldMapView.qml: books use +90° yaw on the marker delegate (tagOnSpine).
     r = Rectangle(
         center=geometry.point(book.pose.x, book.pose.y),
         dimensions=[
             BookObj.SPINE_THICKNESS_MM + 2 * inflation,
             BookObj.COVER_WIDTH_MM + 2 * inflation,
         ],
-        orient=book.pose.theta,
+        orient=wrap_angle(book.pose.theta + pi / 2),
     )
     r.obstacle_id = book.id
     return r
@@ -76,9 +80,9 @@ def _librarian_compute_bounding_box(self):
     ymax = ymin
     objs = self.robot.world_map.objects.values()
     rooms = [self.generate_room_obstacle(obj) for obj in objs if isinstance(obj, RoomObj)]
-    arucos = [self.generate_aruco_obstacle(obj, inflation=0) for obj in objs if isinstance(obj, ArucoMarkerObj)]
-    arucos += [generate_book_obstacle(obj, inflation=0) for obj in objs if isinstance(obj, BookObj)]
-    non_obstacles = rooms + arucos
+    # ArUco markers and books are already represented in self.obstacles; omitting them here
+    # avoids double-counting in bbox (and matched duplicate goal shapes).
+    non_obstacles = rooms
     goals = [self.goal_obstacle] if self.goal_obstacle else []
     for shape in self.obstacles + non_obstacles + goals:
         ((x0, y0), (x1, y1)) = shape.get_bounding_box()

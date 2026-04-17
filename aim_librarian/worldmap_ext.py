@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 
@@ -19,7 +20,36 @@ from aim_fsm.geometry import wrap_angle
 from aim_librarian.books import BookObj, is_book_aruco_id
 
 
+def prune_aruco_markers_in_book_id_range(world_map: WorldMap) -> None:
+    """Drop legacy :class:`ArucoMarkerObj` entries whose ids are modeled as books.
+
+    Spine markers in ``BOOK_FIRST_ID``…``BOOK_LAST_ID`` are represented by
+    :class:`BookObj` only. Old maps may still contain a duplicate ``ArucoMarker``
+    for the same id (different Python type), which breaks association and adds a
+    second obstacle/goal in the path viewer.
+    """
+    with world_map._lock:
+        remove_keys = [
+            key
+            for key, obj in world_map.objects.items()
+            if isinstance(obj, ArucoMarkerObj) and is_book_aruco_id(obj.marker_id)
+        ]
+        removed: list = []
+        for key in remove_keys:
+            removed.append(world_map.objects.pop(key))
+        for obj in removed:
+            if obj in world_map.missing_objects:
+                world_map.missing_objects.remove(obj)
+
+
 class LibrarianWorldMap(WorldMap):
+    def confirm_still_holding(self):
+        # Stock logic only tracks kicker-held barrels/balls; magnet-held books would be cleared.
+        if isinstance(self.robot.holding, BookObj):
+            self.last_held_time = time.time()
+            return
+        super().confirm_still_holding()
+
     def make_new_aruco_objects(self):
         camera_offset_vector = np.array([0, 0, self.robot.kine.camera_from_origin])
         detector = self.robot.aruco_detector
@@ -99,6 +129,7 @@ class LibrarianWorldMap(WorldMap):
 def _migrate_world_map(robot):
     old = robot.world_map
     if isinstance(old, LibrarianWorldMap):
+        prune_aruco_markers_in_book_id_range(old)
         return
     new_map = LibrarianWorldMap(robot)
     with old._lock:
@@ -110,6 +141,7 @@ def _migrate_world_map(robot):
         new_map.last_held_time = old.last_held_time
         new_map.visibility_paused = old.visibility_paused
     robot.world_map = new_map
+    prune_aruco_markers_in_book_id_range(new_map)
 
 
-__all__ = ["LibrarianWorldMap", "_migrate_world_map"]
+__all__ = ["LibrarianWorldMap", "_migrate_world_map", "prune_aruco_markers_in_book_id_range"]
