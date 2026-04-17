@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import numpy as np
-from math import cos, nan, pi, sin, sqrt
+from math import atan2, cos, nan, pi, sin, sqrt
 
 from aim_fsm.events import DataEvent
 from aim_fsm.geometry import wrap_angle
+from aim_fsm.nodes import ActionNode
 from aim_fsm.pilot import PilotToPose
 from aim_fsm.utils import Pose
 from aim_fsm.worldmap import ArucoMarkerObj, WorldObject
@@ -78,13 +79,62 @@ class PilotToArucoMarker(PilotToPose):
             self.post_failure()
             return
         self.target_object = self._world_object_for_marker_id()
-        self.target_pose = self._world_pose_from_marker(markers[self.marker_id])
+        self.target_pose = self._refine_target_pose(
+            self._world_pose_from_marker(markers[self.marker_id])
+        )
         self.robot.rrt.max_iter = self.max_iter
         super(PilotToPose, self).start(event)
+
+    def _refine_target_pose(self, pose: Pose) -> Pose:
+        """Hook for subclasses (e.g. :class:`PilotToBook`) to shift the navigation goal."""
+        return pose
 
 
 class PilotToBook(PilotToArucoMarker):
     """Navigate using the :class:`BookObj` goal (same spine ArUco id); clearer name for swap demos."""
 
+    def __init__(
+        self,
+        marker_id,
+        align_heading=False,
+        book_approach_offset_mm=None,
+        **kwargs,
+    ):
+        super().__init__(marker_id, align_heading=align_heading, **kwargs)
+        if book_approach_offset_mm is None:
+            self.book_approach_offset_mm = BookObj.SPINE_THICKNESS_MM / 2 + 5.0
+        else:
+            self.book_approach_offset_mm = float(book_approach_offset_mm)
 
-__all__ = ["PilotToArucoMarker", "PilotToBook"]
+    def _refine_target_pose(self, pose: Pose) -> Pose:
+        """Shift goal from spine marker centroid toward the robot for magnet / front-cover approach."""
+        if self.book_approach_offset_mm <= 0:
+            return pose
+        rx, ry = self.robot.pose.x, self.robot.pose.y
+        dx, dy = rx - pose.x, ry - pose.y
+        d = sqrt(dx * dx + dy * dy)
+        if d < 1e-3:
+            return pose
+        s = self.book_approach_offset_mm / d
+        return Pose(pose.x + dx * s, pose.y + dy * s, pose.z, pose.theta)
+
+
+class TurnTowardPose(ActionNode):
+    """Rotate in place to face ``(target_pose.x, target_pose.y)`` in the world (cf. ``TurnToward`` for objects)."""
+
+    def __init__(self, target_pose: Pose, turn_speed=None):
+        super().__init__()
+        self.target_pose = target_pose
+        self.turn_speed = turn_speed
+
+    def start(self, event=None):
+        if isinstance(event, DataEvent) and isinstance(event.data, Pose):
+            self.target_pose = event.data
+        super().start(event)
+        dx = self.target_pose.x - self.robot.pose.x
+        dy = self.target_pose.y - self.robot.pose.y
+        angle_deg = wrap_angle(atan2(dy, dx) - self.robot.pose.theta) * 180 / pi
+        self.robot.actuators["drive"].turn(self, angle_deg * pi / 180, self.turn_speed)
+
+
+__all__ = ["PilotToArucoMarker", "PilotToBook", "TurnTowardPose"]

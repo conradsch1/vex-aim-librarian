@@ -3,9 +3,11 @@ Physically swap two books (magnet + navigation).
 
 Assumes spine ArUco ids ``BOOK_FIRST_ID`` and ``BOOK_FIRST_ID+1``, **localized** SLAM, and
 markers visible when each ``PilotToBook`` runs. The robot: drives to each book,
-runs ``Forward`` into the shelf to engage the magnet, marks the book as held, navigates to a
-drop pose, backs off, and releases the book on the map at the target slot. **Tune**
-``ROBOT_STANDOFF_MM``, ``ENGAGE_MM``, and ``RELEASE_BACK_MM`` for your field and magnet.
+runs ``Forward`` into the shelf to engage the magnet, marks the book as held, backs off,
+turns toward the deposit standoff, navigates there, backs off, and releases the book on
+the map at the target slot. **Tune** ``ROBOT_STANDOFF_MM``, ``BOOK_APPROACH_OFFSET_MM``,
+``SHELF_RETREAT_MM``, ``ENGAGE_MM``, ``RELEASE_BACK_MM``, ``POST_DROP_CLEAR_MM``, and survey
+pose for your field and magnet.
 
 Field layout matches ``world_setup/WorldSetup.fsm``. Requires ``install_librarian_extensions``.
 
@@ -29,7 +31,7 @@ from aim_fsm.particle import ArucoCombinedSensorModel
 
 from aim_librarian import BookObj, BOOK_FIRST_ID, install_librarian_extensions
 from aim_librarian.book_manip import AttachBook, DetachBookAtPose
-from aim_librarian.pilot_ext import PilotToBook
+from aim_librarian.pilot_ext import PilotToBook, TurnTowardPose
 
 # Same field constants as ``world_setup/WorldSetup.fsm``
 _TAG_Y = 138
@@ -42,6 +44,9 @@ class SwapBooksDemo(StateMachineProgram):
 
     STAGING_OFFSET_Y_MM = 130.0
     ROBOT_STANDOFF_MM = 115.0
+    BOOK_APPROACH_OFFSET_MM = BookObj.SPINE_THICKNESS_MM / 2 + 5.0
+    SHELF_RETREAT_MM = 80.0
+    POST_DROP_CLEAR_MM = 60.0
     ENGAGE_MM = 0.0
     RELEASE_BACK_MM = -38.0
 
@@ -151,6 +156,11 @@ class SwapBooksDemo(StateMachineProgram):
         """Robot pose in front of the shelf slot ``book_pose``."""
         return Pose(book_pose.x - self.ROBOT_STANDOFF_MM, book_pose.y, 0.0, nan)
 
+    def _pose_survey(self) -> Pose:
+        """Pose between shelf slots and back from the row so both spines can be in view."""
+        shelf_x = _TAG_X - 45.0
+        return Pose(shelf_x - 185.0, 0.0, 0.0, pi)
+
     $setup{
         prompt: Print("SwapBooksDemo: LOCALIZED, cameras see spines. Type start — magnet swap runs.")
         prompt =N=> wait
@@ -158,7 +168,7 @@ class SwapBooksDemo(StateMachineProgram):
         wait: StateNode()
         wait =TM('^\\s*start\\s*$')=> p_a
 
-        p_a: PilotToBook(self.book_id_a)
+        p_a: PilotToBook(self.book_id_a, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM)
         p_a =C=> f_a
         p_a =F=> fail
 
@@ -169,8 +179,16 @@ class SwapBooksDemo(StateMachineProgram):
         settle_a: StateNode() =T(0.4)=> att_a
 
         att_a: AttachBook(self.book_id_a)
-        att_a =C=> go_stg
+        att_a =C=> retreat_stg
         att_a =F=> fail
+
+        retreat_stg: Forward(-self.SHELF_RETREAT_MM)
+        retreat_stg =C=> face_stg
+        retreat_stg =F=> fail
+
+        face_stg: TurnTowardPose(self._robot_goal_for_book(self._pose_staging_a))
+        face_stg =C=> go_stg
+        face_stg =F=> fail
 
         go_stg: PilotToPose(self._robot_goal_for_book(self._pose_staging_a))
         go_stg =C=> bk_a
@@ -181,10 +199,24 @@ class SwapBooksDemo(StateMachineProgram):
         bk_a =F=> fail
 
         drop_stg: DetachBookAtPose(self._pose_staging_a)
-        drop_stg =C=> p_b
+        drop_stg =C=> kick_stg
         drop_stg =F=> fail
 
-        p_b: PilotToBook(self.book_id_b)
+        kick_stg: Kick()
+        kick_stg =C=> clr_stg
+        kick_stg =F=> fail
+
+        clr_stg: Forward(self.POST_DROP_CLEAR_MM)
+        clr_stg =C=> svy_stg
+        clr_stg =F=> fail
+
+        svy_stg: PilotToPose(self._pose_survey())
+        svy_stg =C=> settle_pick_b
+        svy_stg =F=> fail
+
+        settle_pick_b: StateNode() =T(0.35)=> p_b
+
+        p_b: PilotToBook(self.book_id_b, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM)
         p_b =C=> f_b
         p_b =F=> fail
 
@@ -195,8 +227,16 @@ class SwapBooksDemo(StateMachineProgram):
         settle_b: StateNode() =T(0.4)=> att_b
 
         att_b: AttachBook(self.book_id_b)
-        att_b =C=> go_a
+        att_b =C=> retreat_a
         att_b =F=> fail
+
+        retreat_a: Forward(-self.SHELF_RETREAT_MM)
+        retreat_a =C=> face_a
+        retreat_a =F=> fail
+
+        face_a: TurnTowardPose(self._robot_goal_for_book(self._pose0_a))
+        face_a =C=> go_a
+        face_a =F=> fail
 
         go_a: PilotToPose(self._robot_goal_for_book(self._pose0_a))
         go_a =C=> bk_b
@@ -207,10 +247,24 @@ class SwapBooksDemo(StateMachineProgram):
         bk_b =F=> fail
 
         drop_b: DetachBookAtPose(self._pose0_a)
-        drop_b =C=> p_a2
+        drop_b =C=> kick_b
         drop_b =F=> fail
 
-        p_a2: PilotToBook(self.book_id_a)
+        kick_b: Kick()
+        kick_b =C=> clr_b
+        kick_b =F=> fail
+
+        clr_b: Forward(self.POST_DROP_CLEAR_MM)
+        clr_b =C=> svy_b
+        clr_b =F=> fail
+
+        svy_b: PilotToPose(self._pose_survey())
+        svy_b =C=> settle_pick_a2
+        svy_b =F=> fail
+
+        settle_pick_a2: StateNode() =T(0.35)=> p_a2
+
+        p_a2: PilotToBook(self.book_id_a, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM)
         p_a2 =C=> f_a2
         p_a2 =F=> fail
 
@@ -221,8 +275,16 @@ class SwapBooksDemo(StateMachineProgram):
         settle_a2: StateNode() =T(0.4)=> att_a2
 
         att_a2: AttachBook(self.book_id_a)
-        att_a2 =C=> go_b
+        att_a2 =C=> retreat_b
         att_a2 =F=> fail
+
+        retreat_b: Forward(-self.SHELF_RETREAT_MM)
+        retreat_b =C=> face_b
+        retreat_b =F=> fail
+
+        face_b: TurnTowardPose(self._robot_goal_for_book(self._pose0_b))
+        face_b =C=> go_b
+        face_b =F=> fail
 
         go_b: PilotToPose(self._robot_goal_for_book(self._pose0_b))
         go_b =C=> bk_a2

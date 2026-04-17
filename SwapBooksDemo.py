@@ -3,9 +3,11 @@ Physically swap two books (magnet + navigation).
 
 Assumes spine ArUco ids ``BOOK_FIRST_ID`` and ``BOOK_FIRST_ID+1``, **localized** SLAM, and
 markers visible when each ``PilotToBook`` runs. The robot: drives to each book,
-runs ``Forward`` into the shelf to engage the magnet, marks the book as held, navigates to a
-drop pose, backs off, and releases the book on the map at the target slot. **Tune**
-``ROBOT_STANDOFF_MM``, ``ENGAGE_MM``, and ``RELEASE_BACK_MM`` for your field and magnet.
+runs ``Forward`` into the shelf to engage the magnet, marks the book as held, backs off,
+turns toward the deposit standoff, navigates there, backs off, and releases the book on
+the map at the target slot. **Tune** ``ROBOT_STANDOFF_MM``, ``BOOK_APPROACH_OFFSET_MM``,
+``SHELF_RETREAT_MM``, ``ENGAGE_MM``, ``RELEASE_BACK_MM``, ``POST_DROP_CLEAR_MM``, and survey
+pose for your field and magnet.
 
 Field layout matches ``world_setup/WorldSetup.fsm``. Requires ``install_librarian_extensions``.
 
@@ -29,7 +31,7 @@ from aim_fsm.particle import ArucoCombinedSensorModel
 
 from aim_librarian import BookObj, BOOK_FIRST_ID, install_librarian_extensions
 from aim_librarian.book_manip import AttachBook, DetachBookAtPose
-from aim_librarian.pilot_ext import PilotToBook
+from aim_librarian.pilot_ext import PilotToBook, TurnTowardPose
 
 # Same field constants as ``world_setup/WorldSetup.fsm``
 _TAG_Y = 138
@@ -42,6 +44,9 @@ class SwapBooksDemo(StateMachineProgram):
 
     STAGING_OFFSET_Y_MM = 130.0
     ROBOT_STANDOFF_MM = 115.0
+    BOOK_APPROACH_OFFSET_MM = BookObj.SPINE_THICKNESS_MM / 2 + 5.0
+    SHELF_RETREAT_MM = 80.0
+    POST_DROP_CLEAR_MM = 60.0
     ENGAGE_MM = 0.0
     RELEASE_BACK_MM = -38.0
 
@@ -151,6 +156,11 @@ class SwapBooksDemo(StateMachineProgram):
         """Robot pose in front of the shelf slot ``book_pose``."""
         return Pose(book_pose.x - self.ROBOT_STANDOFF_MM, book_pose.y, 0.0, nan)
 
+    def _pose_survey(self) -> Pose:
+        """Pose between shelf slots and back from the row so both spines can be in view."""
+        shelf_x = _TAG_X - 45.0
+        return Pose(shelf_x - 185.0, 0.0, 0.0, pi)
+
     def setup(self):
         #         prompt: Print("SwapBooksDemo: LOCALIZED, cameras see spines. Type start — magnet swap runs.")
         #         prompt =N=> wait
@@ -158,7 +168,7 @@ class SwapBooksDemo(StateMachineProgram):
         #         wait: StateNode()
         #         wait =TM('^\\s*start\\s*$')=> p_a
         # 
-        #         p_a: PilotToBook(self.book_id_a)
+        #         p_a: PilotToBook(self.book_id_a, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM)
         #         p_a =C=> f_a
         #         p_a =F=> fail
         # 
@@ -169,8 +179,16 @@ class SwapBooksDemo(StateMachineProgram):
         #         settle_a: StateNode() =T(0.4)=> att_a
         # 
         #         att_a: AttachBook(self.book_id_a)
-        #         att_a =C=> go_stg
+        #         att_a =C=> retreat_stg
         #         att_a =F=> fail
+        # 
+        #         retreat_stg: Forward(-self.SHELF_RETREAT_MM)
+        #         retreat_stg =C=> face_stg
+        #         retreat_stg =F=> fail
+        # 
+        #         face_stg: TurnTowardPose(self._robot_goal_for_book(self._pose_staging_a))
+        #         face_stg =C=> go_stg
+        #         face_stg =F=> fail
         # 
         #         go_stg: PilotToPose(self._robot_goal_for_book(self._pose_staging_a))
         #         go_stg =C=> bk_a
@@ -181,10 +199,24 @@ class SwapBooksDemo(StateMachineProgram):
         #         bk_a =F=> fail
         # 
         #         drop_stg: DetachBookAtPose(self._pose_staging_a)
-        #         drop_stg =C=> p_b
+        #         drop_stg =C=> kick_stg
         #         drop_stg =F=> fail
         # 
-        #         p_b: PilotToBook(self.book_id_b)
+        #         kick_stg: Kick()
+        #         kick_stg =C=> clr_stg
+        #         kick_stg =F=> fail
+        # 
+        #         clr_stg: Forward(self.POST_DROP_CLEAR_MM)
+        #         clr_stg =C=> svy_stg
+        #         clr_stg =F=> fail
+        # 
+        #         svy_stg: PilotToPose(self._pose_survey())
+        #         svy_stg =C=> settle_pick_b
+        #         svy_stg =F=> fail
+        # 
+        #         settle_pick_b: StateNode() =T(0.35)=> p_b
+        # 
+        #         p_b: PilotToBook(self.book_id_b, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM)
         #         p_b =C=> f_b
         #         p_b =F=> fail
         # 
@@ -195,8 +227,16 @@ class SwapBooksDemo(StateMachineProgram):
         #         settle_b: StateNode() =T(0.4)=> att_b
         # 
         #         att_b: AttachBook(self.book_id_b)
-        #         att_b =C=> go_a
+        #         att_b =C=> retreat_a
         #         att_b =F=> fail
+        # 
+        #         retreat_a: Forward(-self.SHELF_RETREAT_MM)
+        #         retreat_a =C=> face_a
+        #         retreat_a =F=> fail
+        # 
+        #         face_a: TurnTowardPose(self._robot_goal_for_book(self._pose0_a))
+        #         face_a =C=> go_a
+        #         face_a =F=> fail
         # 
         #         go_a: PilotToPose(self._robot_goal_for_book(self._pose0_a))
         #         go_a =C=> bk_b
@@ -207,10 +247,24 @@ class SwapBooksDemo(StateMachineProgram):
         #         bk_b =F=> fail
         # 
         #         drop_b: DetachBookAtPose(self._pose0_a)
-        #         drop_b =C=> p_a2
+        #         drop_b =C=> kick_b
         #         drop_b =F=> fail
         # 
-        #         p_a2: PilotToBook(self.book_id_a)
+        #         kick_b: Kick()
+        #         kick_b =C=> clr_b
+        #         kick_b =F=> fail
+        # 
+        #         clr_b: Forward(self.POST_DROP_CLEAR_MM)
+        #         clr_b =C=> svy_b
+        #         clr_b =F=> fail
+        # 
+        #         svy_b: PilotToPose(self._pose_survey())
+        #         svy_b =C=> settle_pick_a2
+        #         svy_b =F=> fail
+        # 
+        #         settle_pick_a2: StateNode() =T(0.35)=> p_a2
+        # 
+        #         p_a2: PilotToBook(self.book_id_a, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM)
         #         p_a2 =C=> f_a2
         #         p_a2 =F=> fail
         # 
@@ -221,8 +275,16 @@ class SwapBooksDemo(StateMachineProgram):
         #         settle_a2: StateNode() =T(0.4)=> att_a2
         # 
         #         att_a2: AttachBook(self.book_id_a)
-        #         att_a2 =C=> go_b
+        #         att_a2 =C=> retreat_b
         #         att_a2 =F=> fail
+        # 
+        #         retreat_b: Forward(-self.SHELF_RETREAT_MM)
+        #         retreat_b =C=> face_b
+        #         retreat_b =F=> fail
+        # 
+        #         face_b: TurnTowardPose(self._robot_goal_for_book(self._pose0_b))
+        #         face_b =C=> go_b
+        #         face_b =F=> fail
         # 
         #         go_b: PilotToPose(self._robot_goal_for_book(self._pose0_b))
         #         go_b =C=> bk_a2
@@ -240,28 +302,42 @@ class SwapBooksDemo(StateMachineProgram):
         # 
         #         done: ParentCompletes()
         
-        # Code generated by genfsm on Fri Apr 17 16:14:59 2026:
+        # Code generated by genfsm on Fri Apr 17 16:50:47 2026:
         
         prompt = Print("SwapBooksDemo: LOCALIZED, cameras see spines. Type start — magnet swap runs.") .set_name("prompt") .set_parent(self)
         wait = StateNode() .set_name("wait") .set_parent(self)
-        p_a = PilotToBook(self.book_id_a) .set_name("p_a") .set_parent(self)
+        p_a = PilotToBook(self.book_id_a, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM) .set_name("p_a") .set_parent(self)
         f_a = Forward(self.ENGAGE_MM) .set_name("f_a") .set_parent(self)
         settle_a = StateNode() .set_name("settle_a") .set_parent(self)
         att_a = AttachBook(self.book_id_a) .set_name("att_a") .set_parent(self)
+        retreat_stg = Forward(-self.SHELF_RETREAT_MM) .set_name("retreat_stg") .set_parent(self)
+        face_stg = TurnTowardPose(self._robot_goal_for_book(self._pose_staging_a)) .set_name("face_stg") .set_parent(self)
         go_stg = PilotToPose(self._robot_goal_for_book(self._pose_staging_a)) .set_name("go_stg") .set_parent(self)
         bk_a = Forward(self.RELEASE_BACK_MM) .set_name("bk_a") .set_parent(self)
         drop_stg = DetachBookAtPose(self._pose_staging_a) .set_name("drop_stg") .set_parent(self)
-        p_b = PilotToBook(self.book_id_b) .set_name("p_b") .set_parent(self)
+        kick_stg = Kick() .set_name("kick_stg") .set_parent(self)
+        clr_stg = Forward(self.POST_DROP_CLEAR_MM) .set_name("clr_stg") .set_parent(self)
+        svy_stg = PilotToPose(self._pose_survey()) .set_name("svy_stg") .set_parent(self)
+        settle_pick_b = StateNode() .set_name("settle_pick_b") .set_parent(self)
+        p_b = PilotToBook(self.book_id_b, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM) .set_name("p_b") .set_parent(self)
         f_b = Forward(self.ENGAGE_MM) .set_name("f_b") .set_parent(self)
         settle_b = StateNode() .set_name("settle_b") .set_parent(self)
         att_b = AttachBook(self.book_id_b) .set_name("att_b") .set_parent(self)
+        retreat_a = Forward(-self.SHELF_RETREAT_MM) .set_name("retreat_a") .set_parent(self)
+        face_a = TurnTowardPose(self._robot_goal_for_book(self._pose0_a)) .set_name("face_a") .set_parent(self)
         go_a = PilotToPose(self._robot_goal_for_book(self._pose0_a)) .set_name("go_a") .set_parent(self)
         bk_b = Forward(self.RELEASE_BACK_MM) .set_name("bk_b") .set_parent(self)
         drop_b = DetachBookAtPose(self._pose0_a) .set_name("drop_b") .set_parent(self)
-        p_a2 = PilotToBook(self.book_id_a) .set_name("p_a2") .set_parent(self)
+        kick_b = Kick() .set_name("kick_b") .set_parent(self)
+        clr_b = Forward(self.POST_DROP_CLEAR_MM) .set_name("clr_b") .set_parent(self)
+        svy_b = PilotToPose(self._pose_survey()) .set_name("svy_b") .set_parent(self)
+        settle_pick_a2 = StateNode() .set_name("settle_pick_a2") .set_parent(self)
+        p_a2 = PilotToBook(self.book_id_a, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM) .set_name("p_a2") .set_parent(self)
         f_a2 = Forward(self.ENGAGE_MM) .set_name("f_a2") .set_parent(self)
         settle_a2 = StateNode() .set_name("settle_a2") .set_parent(self)
         att_a2 = AttachBook(self.book_id_a) .set_name("att_a2") .set_parent(self)
+        retreat_b = Forward(-self.SHELF_RETREAT_MM) .set_name("retreat_b") .set_parent(self)
+        face_b = TurnTowardPose(self._robot_goal_for_book(self._pose0_b)) .set_name("face_b") .set_parent(self)
         go_b = PilotToPose(self._robot_goal_for_book(self._pose0_b)) .set_name("go_b") .set_parent(self)
         bk_a2 = Forward(self.RELEASE_BACK_MM) .set_name("bk_a2") .set_parent(self)
         drop_fin = DetachBookAtPose(self._pose0_b) .set_name("drop_fin") .set_parent(self)
@@ -290,106 +366,184 @@ class SwapBooksDemo(StateMachineProgram):
         timertrans1 .add_sources(settle_a) .add_destinations(att_a)
         
         completiontrans3 = CompletionTrans() .set_name("completiontrans3")
-        completiontrans3 .add_sources(att_a) .add_destinations(go_stg)
+        completiontrans3 .add_sources(att_a) .add_destinations(retreat_stg)
         
         failuretrans3 = FailureTrans() .set_name("failuretrans3")
         failuretrans3 .add_sources(att_a) .add_destinations(fail)
         
         completiontrans4 = CompletionTrans() .set_name("completiontrans4")
-        completiontrans4 .add_sources(go_stg) .add_destinations(bk_a)
+        completiontrans4 .add_sources(retreat_stg) .add_destinations(face_stg)
         
         failuretrans4 = FailureTrans() .set_name("failuretrans4")
-        failuretrans4 .add_sources(go_stg) .add_destinations(fail)
+        failuretrans4 .add_sources(retreat_stg) .add_destinations(fail)
         
         completiontrans5 = CompletionTrans() .set_name("completiontrans5")
-        completiontrans5 .add_sources(bk_a) .add_destinations(drop_stg)
+        completiontrans5 .add_sources(face_stg) .add_destinations(go_stg)
         
         failuretrans5 = FailureTrans() .set_name("failuretrans5")
-        failuretrans5 .add_sources(bk_a) .add_destinations(fail)
+        failuretrans5 .add_sources(face_stg) .add_destinations(fail)
         
         completiontrans6 = CompletionTrans() .set_name("completiontrans6")
-        completiontrans6 .add_sources(drop_stg) .add_destinations(p_b)
+        completiontrans6 .add_sources(go_stg) .add_destinations(bk_a)
         
         failuretrans6 = FailureTrans() .set_name("failuretrans6")
-        failuretrans6 .add_sources(drop_stg) .add_destinations(fail)
+        failuretrans6 .add_sources(go_stg) .add_destinations(fail)
         
         completiontrans7 = CompletionTrans() .set_name("completiontrans7")
-        completiontrans7 .add_sources(p_b) .add_destinations(f_b)
+        completiontrans7 .add_sources(bk_a) .add_destinations(drop_stg)
         
         failuretrans7 = FailureTrans() .set_name("failuretrans7")
-        failuretrans7 .add_sources(p_b) .add_destinations(fail)
+        failuretrans7 .add_sources(bk_a) .add_destinations(fail)
         
         completiontrans8 = CompletionTrans() .set_name("completiontrans8")
-        completiontrans8 .add_sources(f_b) .add_destinations(settle_b)
+        completiontrans8 .add_sources(drop_stg) .add_destinations(kick_stg)
         
         failuretrans8 = FailureTrans() .set_name("failuretrans8")
-        failuretrans8 .add_sources(f_b) .add_destinations(fail)
-        
-        timertrans2 = TimerTrans(0.4) .set_name("timertrans2")
-        timertrans2 .add_sources(settle_b) .add_destinations(att_b)
+        failuretrans8 .add_sources(drop_stg) .add_destinations(fail)
         
         completiontrans9 = CompletionTrans() .set_name("completiontrans9")
-        completiontrans9 .add_sources(att_b) .add_destinations(go_a)
+        completiontrans9 .add_sources(kick_stg) .add_destinations(clr_stg)
         
         failuretrans9 = FailureTrans() .set_name("failuretrans9")
-        failuretrans9 .add_sources(att_b) .add_destinations(fail)
+        failuretrans9 .add_sources(kick_stg) .add_destinations(fail)
         
         completiontrans10 = CompletionTrans() .set_name("completiontrans10")
-        completiontrans10 .add_sources(go_a) .add_destinations(bk_b)
+        completiontrans10 .add_sources(clr_stg) .add_destinations(svy_stg)
         
         failuretrans10 = FailureTrans() .set_name("failuretrans10")
-        failuretrans10 .add_sources(go_a) .add_destinations(fail)
+        failuretrans10 .add_sources(clr_stg) .add_destinations(fail)
         
         completiontrans11 = CompletionTrans() .set_name("completiontrans11")
-        completiontrans11 .add_sources(bk_b) .add_destinations(drop_b)
+        completiontrans11 .add_sources(svy_stg) .add_destinations(settle_pick_b)
         
         failuretrans11 = FailureTrans() .set_name("failuretrans11")
-        failuretrans11 .add_sources(bk_b) .add_destinations(fail)
+        failuretrans11 .add_sources(svy_stg) .add_destinations(fail)
+        
+        timertrans2 = TimerTrans(0.35) .set_name("timertrans2")
+        timertrans2 .add_sources(settle_pick_b) .add_destinations(p_b)
         
         completiontrans12 = CompletionTrans() .set_name("completiontrans12")
-        completiontrans12 .add_sources(drop_b) .add_destinations(p_a2)
+        completiontrans12 .add_sources(p_b) .add_destinations(f_b)
         
         failuretrans12 = FailureTrans() .set_name("failuretrans12")
-        failuretrans12 .add_sources(drop_b) .add_destinations(fail)
+        failuretrans12 .add_sources(p_b) .add_destinations(fail)
         
         completiontrans13 = CompletionTrans() .set_name("completiontrans13")
-        completiontrans13 .add_sources(p_a2) .add_destinations(f_a2)
+        completiontrans13 .add_sources(f_b) .add_destinations(settle_b)
         
         failuretrans13 = FailureTrans() .set_name("failuretrans13")
-        failuretrans13 .add_sources(p_a2) .add_destinations(fail)
-        
-        completiontrans14 = CompletionTrans() .set_name("completiontrans14")
-        completiontrans14 .add_sources(f_a2) .add_destinations(settle_a2)
-        
-        failuretrans14 = FailureTrans() .set_name("failuretrans14")
-        failuretrans14 .add_sources(f_a2) .add_destinations(fail)
+        failuretrans13 .add_sources(f_b) .add_destinations(fail)
         
         timertrans3 = TimerTrans(0.4) .set_name("timertrans3")
-        timertrans3 .add_sources(settle_a2) .add_destinations(att_a2)
+        timertrans3 .add_sources(settle_b) .add_destinations(att_b)
+        
+        completiontrans14 = CompletionTrans() .set_name("completiontrans14")
+        completiontrans14 .add_sources(att_b) .add_destinations(retreat_a)
+        
+        failuretrans14 = FailureTrans() .set_name("failuretrans14")
+        failuretrans14 .add_sources(att_b) .add_destinations(fail)
         
         completiontrans15 = CompletionTrans() .set_name("completiontrans15")
-        completiontrans15 .add_sources(att_a2) .add_destinations(go_b)
+        completiontrans15 .add_sources(retreat_a) .add_destinations(face_a)
         
         failuretrans15 = FailureTrans() .set_name("failuretrans15")
-        failuretrans15 .add_sources(att_a2) .add_destinations(fail)
+        failuretrans15 .add_sources(retreat_a) .add_destinations(fail)
         
         completiontrans16 = CompletionTrans() .set_name("completiontrans16")
-        completiontrans16 .add_sources(go_b) .add_destinations(bk_a2)
+        completiontrans16 .add_sources(face_a) .add_destinations(go_a)
         
         failuretrans16 = FailureTrans() .set_name("failuretrans16")
-        failuretrans16 .add_sources(go_b) .add_destinations(fail)
+        failuretrans16 .add_sources(face_a) .add_destinations(fail)
         
         completiontrans17 = CompletionTrans() .set_name("completiontrans17")
-        completiontrans17 .add_sources(bk_a2) .add_destinations(drop_fin)
+        completiontrans17 .add_sources(go_a) .add_destinations(bk_b)
         
         failuretrans17 = FailureTrans() .set_name("failuretrans17")
-        failuretrans17 .add_sources(bk_a2) .add_destinations(fail)
+        failuretrans17 .add_sources(go_a) .add_destinations(fail)
         
         completiontrans18 = CompletionTrans() .set_name("completiontrans18")
-        completiontrans18 .add_sources(drop_fin) .add_destinations(done)
+        completiontrans18 .add_sources(bk_b) .add_destinations(drop_b)
         
         failuretrans18 = FailureTrans() .set_name("failuretrans18")
-        failuretrans18 .add_sources(drop_fin) .add_destinations(fail)
+        failuretrans18 .add_sources(bk_b) .add_destinations(fail)
+        
+        completiontrans19 = CompletionTrans() .set_name("completiontrans19")
+        completiontrans19 .add_sources(drop_b) .add_destinations(kick_b)
+        
+        failuretrans19 = FailureTrans() .set_name("failuretrans19")
+        failuretrans19 .add_sources(drop_b) .add_destinations(fail)
+        
+        completiontrans20 = CompletionTrans() .set_name("completiontrans20")
+        completiontrans20 .add_sources(kick_b) .add_destinations(clr_b)
+        
+        failuretrans20 = FailureTrans() .set_name("failuretrans20")
+        failuretrans20 .add_sources(kick_b) .add_destinations(fail)
+        
+        completiontrans21 = CompletionTrans() .set_name("completiontrans21")
+        completiontrans21 .add_sources(clr_b) .add_destinations(svy_b)
+        
+        failuretrans21 = FailureTrans() .set_name("failuretrans21")
+        failuretrans21 .add_sources(clr_b) .add_destinations(fail)
+        
+        completiontrans22 = CompletionTrans() .set_name("completiontrans22")
+        completiontrans22 .add_sources(svy_b) .add_destinations(settle_pick_a2)
+        
+        failuretrans22 = FailureTrans() .set_name("failuretrans22")
+        failuretrans22 .add_sources(svy_b) .add_destinations(fail)
+        
+        timertrans4 = TimerTrans(0.35) .set_name("timertrans4")
+        timertrans4 .add_sources(settle_pick_a2) .add_destinations(p_a2)
+        
+        completiontrans23 = CompletionTrans() .set_name("completiontrans23")
+        completiontrans23 .add_sources(p_a2) .add_destinations(f_a2)
+        
+        failuretrans23 = FailureTrans() .set_name("failuretrans23")
+        failuretrans23 .add_sources(p_a2) .add_destinations(fail)
+        
+        completiontrans24 = CompletionTrans() .set_name("completiontrans24")
+        completiontrans24 .add_sources(f_a2) .add_destinations(settle_a2)
+        
+        failuretrans24 = FailureTrans() .set_name("failuretrans24")
+        failuretrans24 .add_sources(f_a2) .add_destinations(fail)
+        
+        timertrans5 = TimerTrans(0.4) .set_name("timertrans5")
+        timertrans5 .add_sources(settle_a2) .add_destinations(att_a2)
+        
+        completiontrans25 = CompletionTrans() .set_name("completiontrans25")
+        completiontrans25 .add_sources(att_a2) .add_destinations(retreat_b)
+        
+        failuretrans25 = FailureTrans() .set_name("failuretrans25")
+        failuretrans25 .add_sources(att_a2) .add_destinations(fail)
+        
+        completiontrans26 = CompletionTrans() .set_name("completiontrans26")
+        completiontrans26 .add_sources(retreat_b) .add_destinations(face_b)
+        
+        failuretrans26 = FailureTrans() .set_name("failuretrans26")
+        failuretrans26 .add_sources(retreat_b) .add_destinations(fail)
+        
+        completiontrans27 = CompletionTrans() .set_name("completiontrans27")
+        completiontrans27 .add_sources(face_b) .add_destinations(go_b)
+        
+        failuretrans27 = FailureTrans() .set_name("failuretrans27")
+        failuretrans27 .add_sources(face_b) .add_destinations(fail)
+        
+        completiontrans28 = CompletionTrans() .set_name("completiontrans28")
+        completiontrans28 .add_sources(go_b) .add_destinations(bk_a2)
+        
+        failuretrans28 = FailureTrans() .set_name("failuretrans28")
+        failuretrans28 .add_sources(go_b) .add_destinations(fail)
+        
+        completiontrans29 = CompletionTrans() .set_name("completiontrans29")
+        completiontrans29 .add_sources(bk_a2) .add_destinations(drop_fin)
+        
+        failuretrans29 = FailureTrans() .set_name("failuretrans29")
+        failuretrans29 .add_sources(bk_a2) .add_destinations(fail)
+        
+        completiontrans30 = CompletionTrans() .set_name("completiontrans30")
+        completiontrans30 .add_sources(drop_fin) .add_destinations(done)
+        
+        failuretrans30 = FailureTrans() .set_name("failuretrans30")
+        failuretrans30 .add_sources(drop_fin) .add_destinations(fail)
         
         nulltrans2 = NullTrans() .set_name("nulltrans2")
         nulltrans2 .add_sources(fail) .add_destinations(done)
