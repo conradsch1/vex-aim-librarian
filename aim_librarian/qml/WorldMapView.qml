@@ -541,6 +541,8 @@ View3D {
                     baseColor: "#ffffff"
                     baseColorMap: Texture {
                         sourceItem: tagImageFront
+                        // Spine faces use a different UV basis than flat +X markers; flip V so ArUco reads upright.
+                        flipV: tagOnSpine
                     }
                     emissiveFactor: model.visible ? Qt.vector3d(0.1, 0.06, 0.2) : Qt.vector3d(0, 0, 0)
                     roughness: 0.1
@@ -566,6 +568,7 @@ View3D {
                     baseColor: "#ffffff"
                     baseColorMap: Texture {
                         sourceItem: tagImageBack
+                        flipV: tagOnSpine
                     }
                     emissiveFactor: model.visible ? Qt.vector3d(0.1, 0.06, 0.2) : Qt.vector3d(0, 0, 0)
                     roughness: 0.1
