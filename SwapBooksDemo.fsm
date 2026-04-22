@@ -57,7 +57,7 @@ class SwapBooksDemo(StateMachineProgram):
     # Extra approach offset fed to PilotToBook so we stop just shy of the spine.
     BOOK_APPROACH_OFFSET_MM = 0 # BookObj.SPINE_THICKNESS_MM / 2 + 5.0
     # How far to back up after attach/detach so we clear the shelf before turning.
-    SHELF_RETREAT_MM = 200.0
+    SHELF_RETREAT_MM = 300.0
     # Small reverse nudge after a drop so the robot doesn't catch the book when
     # it pivots away (negative = backwards).
     POST_DROP_CLEAR_MM = -60.0
@@ -91,10 +91,10 @@ class SwapBooksDemo(StateMachineProgram):
         # Ground-truth poses of the four corner ArUco tags, fed to the particle
         # filter so SLAM can localize the robot the instant it sees any tag.
         landmarks = {
-            "ArucoMarker-17": Pose(_TAG_X - BOX_WIDTH / 2, _TAG_Y, 5, pi / 2),
-            "ArucoMarker-18": Pose(_TAG_X - BOX_WIDTH / 2, -_TAG_Y, 5, 3 * pi / 2),
-            "ArucoMarker-19": Pose(_TAG_X, -_TAG_Y + BOX_WIDTH / 2, 5, pi),
-            "ArucoMarker-20": Pose(_TAG_X, _TAG_Y - BOX_WIDTH / 2, 5, pi),
+            "ArucoMarker-17": Pose(_TAG_X - BOX_WIDTH / 2, _TAG_Y, 5, 90),
+            "ArucoMarker-18": Pose(_TAG_X - BOX_WIDTH / 2, -_TAG_Y, 5, 270),
+            "ArucoMarker-19": Pose(_TAG_X, -_TAG_Y + BOX_WIDTH / 2, 5, 180),
+            "ArucoMarker-20": Pose(_TAG_X, _TAG_Y - BOX_WIDTH / 2, 5, 180),
         }
         pf = ParticleFilter(
             robot,
@@ -247,9 +247,28 @@ class SwapBooksDemo(StateMachineProgram):
         # LEG 2: Pick book B and drop it into book A's (now empty) slot.
         # ================================================================
         p_b: PilotToBook(self.book_id_b, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM)
-        p_b =C=> fail
+        p_b =C=> back_up2
         p_b =F=> fail
 
+        back_up2: Forward(-100.0)
+        back_up2 =C=> turn_right2
+        back_up2 =F=> fail
+
+        turn_right2: Turn(-90)
+        turn_right2 =C=> move_right2
+        turn_right2 =F=> fail
+
+        move_right2: Forward(50.0)
+        move_right2 =C=> turn_left2
+        move_right2 =F=> fail
+
+        turn_left2: Turn(90)
+        turn_left2 =C=> move_forward2
+        turn_left2 =F=> fail
+
+        move_forward2: Forward(100.0)
+        move_forward2 =C=> p_b
+        move_forward2 =F=> fail
 
         # ================================================================
         # LEG 3: Pick book A from staging and drop it into book B's old slot.
