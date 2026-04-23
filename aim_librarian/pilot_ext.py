@@ -73,15 +73,36 @@ class PilotToArucoMarker(PilotToPose):
             markers = det.snapshot_seen_markers()
         else:
             markers = det.seen_marker_objects.copy()
-        if self.marker_id not in markers:
-            print(f"PilotToArucoMarker: marker id {self.marker_id} not in view")
-            self.punt_super_start()
-            self.post_failure()
-            return
-        self.target_object = self._world_object_for_marker_id()
-        self.target_pose = self._refine_target_pose(
-            self._world_pose_from_marker(markers[self.marker_id])
-        )
+
+        if self.marker_id in markers:
+            self.target_object = self._world_object_for_marker_id()
+            self.target_pose = self._refine_target_pose(
+                self._world_pose_from_marker(markers[self.marker_id])
+            )
+        else:
+            # Spine not in the current frame (motion blur, angle, timing) but SLAM may
+            # still have a visible BookObj — navigate to the map pose like PilotToPose(WorldObject).
+            map_obj = self._world_object_for_marker_id()
+            if isinstance(map_obj, BookObj) and map_obj.is_visible:
+                print(
+                    f"PilotToArucoMarker: marker {self.marker_id} not in snapshot; "
+                    "using BookObj map pose"
+                )
+                self.target_object = map_obj
+                bp = map_obj.pose
+                z = float(bp.z) if getattr(bp, "z", None) is not None else BookObj.HEIGHT_MM / 2
+                self.target_pose = self._refine_target_pose(
+                    Pose(float(bp.x), float(bp.y), z, nan)
+                )
+            else:
+                print(
+                    f"PilotToArucoMarker: marker id {self.marker_id} not in view "
+                    f"and no visible BookObj on map"
+                )
+                self.punt_super_start()
+                self.post_failure()
+                return
+
         self.robot.rrt.max_iter = self.max_iter
         super(PilotToPose, self).start(event)
 
@@ -107,7 +128,15 @@ class PilotToBook(PilotToArucoMarker):
             self.book_approach_offset_mm = float(book_approach_offset_mm)
 
     def _refine_target_pose(self, pose: Pose) -> Pose:
-        """Shift goal from spine marker centroid toward the robot for magnet / front-cover approach."""
+        """Shift goal from spine marker centroid toward the robot for magnet / front-cover approach.
+
+        The returned pose's heading always points *from the standoff back toward
+        the marker centroid* so that a subsequent ``Forward(N)`` engage step
+        drives INTO the book, not away from it. (Note: ``align_heading=True``
+        on its own sets the heading to the marker's *outward* normal, i.e. the
+        direction facing AWAY from the book center. That's the wrong heading
+        for engagement, so we override it here whenever an offset is applied.)
+        """
         if self.book_approach_offset_mm <= 0:
             return pose
         rx, ry = self.robot.pose.x, self.robot.pose.y
@@ -116,7 +145,10 @@ class PilotToBook(PilotToArucoMarker):
         if d < 1e-3:
             return pose
         s = self.book_approach_offset_mm / d
-        return Pose(pose.x + dx * s, pose.y + dy * s, pose.z, pose.theta)
+        new_x = pose.x + dx * s
+        new_y = pose.y + dy * s
+        new_theta = atan2(pose.y - new_y, pose.x - new_x)
+        return Pose(new_x, new_y, pose.z, new_theta)
 
 
 class TurnTowardPose(ActionNode):

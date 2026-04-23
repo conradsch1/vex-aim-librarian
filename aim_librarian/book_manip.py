@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from aim_fsm import StateNode
 from aim_fsm.utils import Pose
 
@@ -63,4 +65,70 @@ class DetachBookAtPose(StateNode):
         self.post_completion()
 
 
-__all__ = ["AttachBook", "DetachBookAtPose"]
+class WaitUntilBookRemoved(StateNode):
+    """Poll ArUco vision until the book spine id stays out of view; then clear ``robot.holding``.
+
+    Used when a patron removes a book from the magnet: there is no barrel/ball sensor for
+    books, so absence of the spine marker (debounced) is the release cue.
+    """
+
+    POLL_S = 0.12
+    ABSENT_S = 1.0
+
+    def __init__(self, marker_id: int | None = None):
+        super().__init__()
+        self.marker_id = marker_id
+        self._poll_handle = None
+        self._absent_since: float | None = None
+        self._mid: int | None = None
+
+    def start(self, event=None):
+        super().start(event)
+        self._absent_since = None
+        mid = self.marker_id
+        if mid is None:
+            mid = getattr(self.parent, "marker_id", None)
+        if mid is None:
+            print("WaitUntilBookRemoved: no marker_id")
+            self.post_failure()
+            return
+        self._mid = int(mid)
+        self._poll_once()
+
+    def _poll_once(self):
+        if not self.running:
+            return
+        det = getattr(self.robot, "aruco_detector", None)
+        if det is None:
+            print("WaitUntilBookRemoved: no aruco_detector")
+            self.post_failure()
+            return
+        if hasattr(det, "snapshot_seen_markers"):
+            seen = det.snapshot_seen_markers()
+        else:
+            seen = det.seen_marker_objects
+        assert self._mid is not None
+        if self._mid in seen:
+            self._absent_since = None
+        else:
+            now = time.time()
+            if self._absent_since is None:
+                self._absent_since = now
+            elif now - self._absent_since >= self.ABSENT_S:
+                held = self.robot.holding
+                if isinstance(held, BookObj) and held.marker_id == self._mid:
+                    held.held_by = None
+                    self.robot.holding = None
+                print(f"WaitUntilBookRemoved: spine {self._mid} absent; holding cleared")
+                self.post_completion()
+                return
+        self._poll_handle = self.robot.loop.call_later(self.POLL_S, self._poll_once)
+
+    def stop(self):
+        if self._poll_handle:
+            self._poll_handle.cancel()
+            self._poll_handle = None
+        super().stop()
+
+
+__all__ = ["AttachBook", "DetachBookAtPose", "WaitUntilBookRemoved"]
