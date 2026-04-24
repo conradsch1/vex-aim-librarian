@@ -14,10 +14,112 @@ from aim_fsm.worldmap import (
     DoorwayObj,
     AprilTagObj,
 )
-from aim_fsm.utils import Pose
+from aim_fsm.aim_kin import AIMKinematics
+from aim_fsm.utils import PoseEstimate
 from aim_fsm.geometry import wrap_angle
 
 from aim_librarian.books import BookObj, is_book_aruco_id
+
+
+def _ensure_bookobj_synthetic_at_robot(robot, marker_id: int) -> BookObj | None:
+    """Insert a :class:`BookObj` when the spine is not in the Aruco snapshot (e.g. too close
+    to the camera after ``Forward(ENGAGE_MM)``). Pose is the spine centroid from robot
+    center along heading, at magnet-touch depth (same components as ``BOOK_APPROACH_OFFSET``
+    minus the pre-engage gap).
+    """
+    wm = robot.world_map
+    name = f"Book-{marker_id}"
+    spec = {"name": name, "id": marker_id, "marker": None}
+    obj = BookObj(spec)
+    # After engage, marker centroid ≈ this far ahead of robot origin along +heading.
+    d = AIMKinematics.body_diameter / 2.0 + BookObj.SPINE_THICKNESS_MM / 2.0
+    th = robot.pose.theta
+    obj.pose = PoseEstimate(
+        robot.pose.x + d * math.cos(th),
+        robot.pose.y + d * math.sin(th),
+        BookObj.HEIGHT_MM / 2,
+        wrap_angle(th + math.pi),
+    )
+    obj.is_visible = True
+
+    with wm._lock:
+        for o in wm.objects.values():
+            if isinstance(o, BookObj) and o.marker_id == marker_id:
+                return o
+        obj_id = wm.next_in_sequence(name)
+        wm.objects[obj_id] = obj
+    print(
+        f"ensure_bookobj_from_vision: inserted {obj_id} from robot geometry "
+        "(spine not in camera FOV)"
+    )
+    return obj
+
+
+def ensure_bookobj_from_vision(robot, marker_id: int) -> BookObj | None:
+    """Ensure ``world_map.objects`` has a :class:`BookObj` for ``marker_id`` so attach can run.
+
+    Tries, in order:
+
+    1. Return existing map entry.
+    2. If the spine is in the current Aruco snapshot, insert using the same pose math as
+       :meth:`LibrarianWorldMap.make_new_aruco_objects`.
+    3. Otherwise insert a synthetic book at magnet depth along the robot heading — after
+       ``Forward(ENGAGE_MM)`` the tag is often **too close** to see, so step 2 fails even
+       though the approach succeeded.
+
+    The map normally waits for several frames via ``process_unassociated_objects`` before
+    adding a book; :class:`~aim_librarian.book_manip.AttachBook` only looks at ``objects``.
+    """
+    wm = robot.world_map
+    with wm._lock:
+        for obj in wm.objects.values():
+            if isinstance(obj, BookObj) and obj.marker_id == marker_id:
+                return obj
+
+    if not is_book_aruco_id(marker_id):
+        return None
+
+    det = getattr(robot, "aruco_detector", None)
+    seen_markers: dict = {}
+    if det is not None:
+        if hasattr(det, "snapshot_seen_markers"):
+            seen_markers = det.snapshot_seen_markers()
+        else:
+            seen_markers = det.seen_marker_objects.copy()
+
+    if marker_id not in seen_markers:
+        return _ensure_bookobj_synthetic_at_robot(robot, marker_id)
+
+    marker = seen_markers[marker_id]
+
+    camera_offset_vector = np.array([0, 0, robot.kine.camera_from_origin])
+    sensor_coords = marker.camera_coords + camera_offset_vector
+    sensor_distance = math.sqrt(sensor_coords[0] ** 2 + sensor_coords[2] ** 2)
+    sensor_bearing = math.atan2(sensor_coords[0], sensor_coords[2])
+    sensor_orient = wrap_angle(math.pi - marker.euler_angles[1])
+    theta = robot.pose.theta
+    name = f"Book-{marker_id}"
+    spec = {"name": name, "id": marker_id, "marker": marker}
+    obj = BookObj(spec)
+    obj.pose = PoseEstimate(
+        robot.pose.x + sensor_distance * math.cos(theta + sensor_bearing),
+        robot.pose.y + sensor_distance * math.sin(theta + sensor_bearing),
+        BookObj.HEIGHT_MM / 2,
+        wrap_angle(robot.pose.theta + sensor_orient),
+    )
+    obj.sensor_distance = sensor_distance
+    obj.sensor_bearing = sensor_bearing
+    obj.sensor_orient = sensor_orient
+    obj.is_visible = True
+
+    with wm._lock:
+        for o in wm.objects.values():
+            if isinstance(o, BookObj) and o.marker_id == marker_id:
+                return o
+        obj_id = wm.next_in_sequence(name)
+        wm.objects[obj_id] = obj
+    print(f"ensure_bookobj_from_vision: inserted {obj_id} from snapshot so attach can proceed")
+    return obj
 
 
 def prune_aruco_markers_in_book_id_range(world_map: WorldMap) -> None:
@@ -73,7 +175,7 @@ class LibrarianWorldMap(WorldMap):
             sensor_bearing = math.atan2(sensor_coords[0], sensor_coords[2])
             sensor_orient = wrap_angle(math.pi - marker.euler_angles[1])
             theta = self.robot.pose.theta
-            obj.pose = Pose(
+            obj.pose = PoseEstimate(
                 self.robot.pose.x + sensor_distance * math.cos(theta + sensor_bearing),
                 self.robot.pose.y + sensor_distance * math.sin(theta + sensor_bearing),
                 z_pose,
@@ -144,4 +246,9 @@ def _migrate_world_map(robot):
     prune_aruco_markers_in_book_id_range(new_map)
 
 
-__all__ = ["LibrarianWorldMap", "_migrate_world_map", "prune_aruco_markers_in_book_id_range"]
+__all__ = [
+    "LibrarianWorldMap",
+    "_migrate_world_map",
+    "ensure_bookobj_from_vision",
+    "prune_aruco_markers_in_book_id_range",
+]

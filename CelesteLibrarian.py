@@ -2,7 +2,9 @@
 Celeste personality + librarian book delivery.
 
 Extends stock :class:`Celeste` with the same GPT preamble and command dispatch, plus
-``#getbook N`` to fetch a book by spine ArUco id (or 1-based shelf index). Requires
+``#getbook N`` to fetch a book by spine ArUco id (or 1-based shelf index), and
+``#returnbook S`` to take a book from the patron staging area and shelve it into an
+empty slot ``S`` (slot index 1–4 left-to-right, or spine id 9–12). Requires
 ``vex-aim-tools`` and ``vex-aim-librarian`` on ``PYTHONPATH``.
 
 From ``simple_cli``::
@@ -13,6 +15,11 @@ Sequence for ``#getbook``: capture current pose → pilot to book → settle →
 engage forward → attach → small shelf-clearance back-off → pilot back to the captured
 pose → turn 180° to present to the patron → wait until spine marker is no longer seen
 → turn back.
+
+Sequence for ``#returnbook``: verify the robot is not already holding a book and the
+book-10 shelve cell is vacant → turn 90° right (robot convention −90°) → pilot to the
+staged book (spine id 10) → pick it up → turn toward and pilot to the fixed book-10
+shelve pose (``RETURN_SHELF_BOOK10_*_MM``) → release there on the map.
 
 Tune poses and distances for your field (class attributes on :class:`CelesteLibrarian`).
 
@@ -36,10 +43,18 @@ from aim_librarian import (
     install_librarian_extensions,
     is_book_aruco_id,
 )
-from aim_librarian.book_manip import AttachBook, WaitUntilBookRemoved
+from aim_librarian.worldmap_ext import ensure_bookobj_from_vision
+from aim_librarian.book_manip import AttachBook, DetachBookAtPose, WaitUntilBookRemoved
 from aim_librarian.books import BookObj
+from aim_librarian.pilot_ext import TurnTowardPose
 
 from Celeste import CELESTE_VERSION, Celeste, new_preamble
+
+CELESTE_LIBRARIAN_VERSION = "1.1"
+
+_RETURN_SHELF_FIRST = 9
+_RETURN_SHELF_LAST = 12
+_RETURN_SHELF_NSLOTS = _RETURN_SHELF_LAST - _RETURN_SHELF_FIRST + 1
 
 _LIBRARIAN_PREAMBLE_EXTENSION = f"""
   # LIBRARIAN SECTION.
@@ -63,10 +78,24 @@ _LIBRARIAN_PREAMBLE_EXTENSION = f"""
   body-control command for a book; ``#getbook`` is the only correct command for
   any object whose name starts with ``Book-``. Output nothing else on the line.
   After the trip completes you may speak briefly.
+
+  RETURN-BOOK RULE (also overrides body-control for shelving):
+  When the user hands back a book at the staging pad, or asks to shelve, return,
+  "put it away", "put this in slot", etc., you MUST output exactly one line:
+
+      #returnbook S
+
+  where S is either (a) a shelf slot index 1..{_RETURN_SHELF_NSLOTS} counting **from the left**
+  (slot 1 is the leftmost slot, corresponding to spine id {_RETURN_SHELF_FIRST}), or (b) a spine id
+  {_RETURN_SHELF_FIRST}..{_RETURN_SHELF_LAST} naming which **empty** slot to fill.
+
+  NEVER use ``#pilottoobject``, ``#pickup``, ``#drop``, or other body-control commands for this;
+  ``#returnbook`` is the only correct command for shelving a patron-returned book.
+  Output nothing else on the line. After the trip completes you may speak briefly.
 """
 
 class CelesteLibrarian(Celeste):
-    """Celeste + localized librarian field (corner ArUco only) and ``#getbook`` macro."""
+    """Celeste + librarian field: ``#getbook`` and ``#returnbook`` macros."""
 
     # Field layout (mm, radians) — match ``world_setup/WorldSetup.fsm`` / ``SwapBooksDemo``.
     _TAG_Y = 138
@@ -106,6 +135,36 @@ class CelesteLibrarian(Celeste):
     # look deliberate when handing the book to a patron, and slow enough that
     # the IMU's gyro-threshold check doesn't false-trigger a "LOST" pose.
     PRESENT_TURN_SPEED_DPS = 45.0
+
+    # Patron return / ``#returnbook`` — layout numbers are **centimeters**, converted to mm.
+    _RETURN_CM_TO_MM = 10.0
+    RETURN_STAGING_X_MM = 0.0
+    RETURN_STAGING_Y_MM = -14.0 * _RETURN_CM_TO_MM
+    RETURN_SHELF_MARKER_IDS = (9, 10, 11, 12)
+    RETURN_SLOT_Y_MM = {
+        9: 6.75 * _RETURN_CM_TO_MM,
+        10: 2.25 * _RETURN_CM_TO_MM,
+        11: -2.25 * _RETURN_CM_TO_MM,
+        12: -6.75 * _RETURN_CM_TO_MM,
+    }
+    RETURN_STAGING_DETECT_RADIUS_MM = 160.0
+    # Patron-return flow: after vacancy checks, turn toward staging then pilot to this spine id.
+    RETURN_STAGING_SPINE_ID = 10
+    # Staging pickup only: drive a bit farther forward than ``ENGAGE_MM`` so the magnet meets the spine.
+    RETURN_STAGING_ENGAGE_EXTRA_MM = 12.0
+    RETURN_STAGING_ENGAGE_MM = ENGAGE_MM + RETURN_STAGING_ENGAGE_EXTRA_MM
+    # After pickup, shelve at this world pose (cm → mm). Book 10 column: (+2.25 cm, +18 cm) x, y.
+    RETURN_SHELF_BOOK10_X_MM = -2.25 * _RETURN_CM_TO_MM
+    RETURN_SHELF_BOOK10_Y_MM = -18.0 * _RETURN_CM_TO_MM
+    RETURN_SLOT_OCCUPANCY_TOL_MM = 28.0
+    RETURN_SHELF_ROW_X_TOL_MM = 55.0
+    RETURN_NAV_RETREAT_MM = 220.0
+    RETURN_RELEASE_BACK_MM = -38.0
+    RETURN_POST_DROP_CLEAR_MM = -60.0
+    # ``PilotToPose`` always runs the RRT (see ``aim_fsm.pilot.PilotToPose``). Staging at
+    # y≈-14 cm lines up with corner ``ArucoMarker-18`` at ``(-_TAG_Y)``; a shallow +X
+    # standoff collides that goal with marker 18's inflated obstacle — add extra +X.
+    RETURN_STAGING_EXTRA_X_MM = 100.0
 
     @classmethod
     def shelf_x_mm(cls) -> float:
@@ -336,12 +395,243 @@ class CelesteLibrarian(Celeste):
 
             return self
 
+    class CmdReturnBook(StateNode):
+        """Pilot to patron staging, confirm a spine 9-12 there, pick up, shelve in an empty slot."""
+
+        target_slot_id: int = _RETURN_SHELF_FIRST
+        detected_marker_id: int = _RETURN_SHELF_FIRST
+
+        def start(self, event=None):
+            if self.running:
+                return
+            self._parse_ok = self._parse_returnbook_event(event)
+            if self._parse_ok:
+                self.detected_marker_id = CelesteLibrarian.RETURN_STAGING_SPINE_ID
+            super().start(event)
+
+        def _parse_returnbook_event(self, event) -> bool:
+            raw = getattr(event, "data", "") if event is not None else ""
+            if not isinstance(raw, str):
+                print(f"CmdReturnBook: non-string event data: {raw!r}")
+                return False
+            parts = raw.strip().split()
+            if len(parts) < 2:
+                print(f"CmdReturnBook: missing slot in {raw!r}")
+                return False
+            try:
+                n = int(parts[1])
+            except ValueError:
+                print(f"CmdReturnBook: slot is not an integer in {raw!r}")
+                return False
+            ids = CelesteLibrarian.RETURN_SHELF_MARKER_IDS
+            nslots = len(ids)
+            if 1 <= n <= nslots:
+                n = ids[0] + (n - 1)
+            if n not in ids:
+                print(
+                    f"CmdReturnBook: {n} is not spine id {_RETURN_SHELF_FIRST}-{_RETURN_SHELF_LAST} "
+                    f"or slot index 1-{nslots}"
+                )
+                return False
+            self.target_slot_id = n
+            print(f"CmdReturnBook: shelve into column / spine id {n}")
+            return True
+
+        class ParseReturnSlot(StateNode):
+            def start(self, event=None):
+                super().start(event)
+                if getattr(self.parent, "_parse_ok", False):
+                    self.post_completion()
+                else:
+                    self.post_failure()
+
+        class CheckNotHolding(StateNode):
+            def start(self, event=None):
+                super().start(event)
+                if self.robot.holding is not None:
+                    print("CmdReturnBook: robot is already holding an object")
+                    self.post_failure()
+                    return
+                self.post_completion()
+
+        class CheckTargetSlotVacant(StateNode):
+            def start(self, event=None):
+                super().start(event)
+                cl = CelesteLibrarian
+                sx = cl.RETURN_SHELF_BOOK10_X_MM
+                sy = cl.RETURN_SHELF_BOOK10_Y_MM
+                tol = cl.RETURN_SLOT_OCCUPANCY_TOL_MM
+                xtol = cl.RETURN_SHELF_ROW_X_TOL_MM
+                for obj in self.robot.world_map.objects.values():
+                    if not isinstance(obj, BookObj):
+                        continue
+                    if obj.held_by is not None:
+                        continue
+                    if abs(obj.pose.x - sx) > xtol:
+                        continue
+                    if abs(obj.pose.y - sy) <= tol:
+                        print(
+                            "CmdReturnBook: book-10 shelve slot looks occupied "
+                            f"(BookObj marker {obj.marker_id} near ({sx:.1f}, {sy:.1f}) mm)"
+                        )
+                        self.post_failure()
+                        return
+                self.post_completion()
+
+        class TurnTowardStagedBook(Turn):
+            """Face the staged book: 90° right in robot convention (-90°)."""
+
+            def __init__(self):
+                super().__init__(
+                    -90.0,
+                    turn_speed=CelesteLibrarian.PRESENT_TURN_SPEED_DPS,
+                )
+
+        class PilotToStagedBook(PilotToBook):
+            def __init__(self, **kw):
+                super().__init__(BOOK_FIRST_ID, **kw)
+
+            def start(self, event=None):
+                self.marker_id = CelesteLibrarian.RETURN_STAGING_SPINE_ID
+                super().start(event)
+
+        class AttachDetectedBook(AttachBook):
+            def __init__(self):
+                super().__init__(BOOK_FIRST_ID)
+
+            def start(self, event=None):
+                self.marker_id = self.parent.detected_marker_id
+                # Map often has no BookObj until pending vision frames complete; attach only
+                # consults ``world_map.objects``. Seed from the live snapshot if needed.
+                ensure_bookobj_from_vision(self.robot, self.marker_id)
+                super().start(event)
+
+        class TurnTowardTargetSlot(TurnTowardPose):
+            def __init__(self):
+                super().__init__(target_pose=Pose(0.0, 0.0, 0.0, 0.0))
+
+            def start(self, event=None):
+                cl = CelesteLibrarian
+                sx = cl.RETURN_SHELF_BOOK10_X_MM
+                sy = cl.RETURN_SHELF_BOOK10_Y_MM
+                self.target_pose = Pose(180.0, -25.0, 0.0, 0.0)
+                super().start(event)
+
+        class PilotToSlotStandoff(PilotToPose):
+            def __init__(self, **kw):
+                super().__init__(target_pose=None, **kw)
+
+            def start(self, event=None):
+                cl = CelesteLibrarian
+                sy = cl.RETURN_SHELF_BOOK10_Y_MM
+                sx = cl.RETURN_SHELF_BOOK10_X_MM
+                # self.target_pose = Pose(sx, sy, 0.0, 0.0)
+                self.target_pose = Pose(180.0, -25.0, 0.0, 0.0)
+                super().start(event)
+
+        class DetachAtTargetSlot(DetachBookAtPose):
+            def __init__(self):
+                super().__init__(Pose(0.0, 0.0, BookObj.HEIGHT_MM / 2, pi))
+
+            def start(self, event=None):
+                cl = CelesteLibrarian
+                self.pose = Pose(
+                    cl.RETURN_SHELF_BOOK10_X_MM,
+                    cl.RETURN_SHELF_BOOK10_Y_MM,
+                    BookObj.HEIGHT_MM / 2,
+                    pi,
+                )
+                super().start(event)
+
+        def setup(self):
+            parse = self.ParseReturnSlot() .set_name("rb_parse") .set_parent(self)
+            not_hold = self.CheckNotHolding() .set_name("rb_not_holding") .set_parent(self)
+            vacant = self.CheckTargetSlotVacant() .set_name("rb_slot_vacant") .set_parent(self)
+            turn_staged = self.TurnTowardStagedBook() .set_name("rb_turn_staged") .set_parent(self)
+            pilot_book = self.PilotToStagedBook(
+                book_approach_offset_mm=CelesteLibrarian.BOOK_APPROACH_OFFSET_MM
+            ) .set_name("rb_pilot_book") .set_parent(self)
+            settle_b = StateNode() .set_name("rb_settle_b") .set_parent(self)
+            engage = Forward(CelesteLibrarian.RETURN_STAGING_ENGAGE_MM) .set_name("rb_engage") .set_parent(self)
+            attach = self.AttachDetectedBook() .set_name("rb_attach") .set_parent(self)
+            retreat_stg = Forward(-CelesteLibrarian.RETURN_NAV_RETREAT_MM) .set_name(
+                "rb_retreat_staging"
+            ) .set_parent(self)
+            turn_slot = self.TurnTowardTargetSlot() .set_name("rb_turn_slot") .set_parent(self)
+            pilot_slot = self.PilotToSlotStandoff() .set_name("rb_pilot_slot") .set_parent(self)
+            release_fwd = Forward(CelesteLibrarian.RETURN_RELEASE_BACK_MM) .set_name(
+                "rb_release_fwd"
+            ) .set_parent(self)
+            detach = self.DetachAtTargetSlot() .set_name("rb_detach") .set_parent(self)
+            kick = Kick() .set_name("rb_kick") .set_parent(self)
+            post_clear = Forward(CelesteLibrarian.RETURN_POST_DROP_CLEAR_MM) .set_name(
+                "rb_post_clear"
+            ) .set_parent(self)
+            done = ParentCompletes() .set_name("rb_done") .set_parent(self)
+            fail = Say(
+                "Sorry, I couldn't put that book away. Let's check the staging area and the shelf."
+            ) .set_name("rb_fail") .set_parent(self)
+            fail_done = ParentCompletes() .set_name("rb_fail_done") .set_parent(self)
+
+            CompletionTrans() .add_sources(parse) .add_destinations(not_hold)
+            FailureTrans() .add_sources(parse) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(not_hold) .add_destinations(vacant)
+            FailureTrans() .add_sources(not_hold) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(vacant) .add_destinations(turn_staged)
+            FailureTrans() .add_sources(vacant) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(turn_staged) .add_destinations(pilot_book)
+            FailureTrans() .add_sources(turn_staged) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(pilot_book) .add_destinations(settle_b)
+            FailureTrans() .add_sources(pilot_book) .add_destinations(fail)
+            PilotTrans(GoalUnreachable) .add_sources(pilot_book) .add_destinations(fail)
+
+            TimerTrans(CelesteLibrarian.SETTLE_S) .add_sources(settle_b) .add_destinations(engage)
+
+            CompletionTrans() .add_sources(engage) .add_destinations(attach)
+            FailureTrans() .add_sources(engage) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(attach) .add_destinations(retreat_stg)
+            FailureTrans() .add_sources(attach) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(retreat_stg) .add_destinations(turn_slot)
+            FailureTrans() .add_sources(retreat_stg) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(turn_slot) .add_destinations(pilot_slot)
+            FailureTrans() .add_sources(turn_slot) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(pilot_slot) .add_destinations(release_fwd)
+            FailureTrans() .add_sources(pilot_slot) .add_destinations(fail)
+            PilotTrans(GoalUnreachable) .add_sources(pilot_slot) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(release_fwd) .add_destinations(detach)
+            FailureTrans() .add_sources(release_fwd) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(detach) .add_destinations(kick)
+            FailureTrans() .add_sources(detach) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(kick) .add_destinations(post_clear)
+            FailureTrans() .add_sources(kick) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(post_clear) .add_destinations(done)
+            FailureTrans() .add_sources(post_clear) .add_destinations(fail)
+
+            CompletionTrans() .add_sources(fail) .add_destinations(fail_done)
+
+            return self
+
     def setup(self):
         super().setup()
         dispatch = self.children["dispatch"]
         cmdgetbook = self.CmdGetBook() .set_name("cmdgetbook") .set_parent(self)
         DataTrans(re.compile(r"#getbook\s+")) .add_sources(dispatch) .add_destinations(cmdgetbook)
         CNextTrans() .add_sources(cmdgetbook) .add_destinations(dispatch)
+        cmdreturnbook = self.CmdReturnBook() .set_name("cmdreturnbook") .set_parent(self)
+        DataTrans(re.compile(r"#returnbook\s+")) .add_sources(dispatch) .add_destinations(cmdreturnbook)
+        CNextTrans() .add_sources(cmdreturnbook) .add_destinations(dispatch)
 
 
-__all__ = ["CelesteLibrarian", "CELESTE_VERSION"]
+__all__ = ["CelesteLibrarian", "CELESTE_VERSION", "CELESTE_LIBRARIAN_VERSION"]

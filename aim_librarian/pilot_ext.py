@@ -15,6 +15,20 @@ from aim_fsm.worldmap import ArucoMarkerObj, WorldObject
 from aim_librarian.books import BookObj, is_book_aruco_id
 
 
+def spine_marker_world_xy(robot, marker, marker_id: int) -> tuple[float, float]:
+    """Horizontal world coordinates (mm) of a spine marker from the current robot pose and vision."""
+    camera_offset_vector = np.array([0, 0, robot.kine.camera_from_origin])
+    sensor_coords = np.array(marker.camera_coords) + camera_offset_vector
+    sensor_distance = sqrt(sensor_coords[0] ** 2 + sensor_coords[2] ** 2)
+    sensor_bearing = np.arctan2(sensor_coords[0], sensor_coords[2])
+    theta_robot = robot.pose.theta
+    x = robot.pose.x + sensor_distance * cos(theta_robot + sensor_bearing)
+    y = robot.pose.y + sensor_distance * sin(theta_robot + sensor_bearing)
+    if not is_book_aruco_id(marker_id):
+        raise ValueError(f"spine_marker_world_xy: marker_id {marker_id} is not a book spine id")
+    return (x, y)
+
+
 class PilotToArucoMarker(PilotToPose):
     """Same behavior as the former vex-aim-tools implementation; lives in librarian."""
 
@@ -169,4 +183,4 @@ class TurnTowardPose(ActionNode):
         self.robot.actuators["drive"].turn(self, angle_deg * pi / 180, self.turn_speed)
 
 
-__all__ = ["PilotToArucoMarker", "PilotToBook", "TurnTowardPose"]
+__all__ = ["PilotToArucoMarker", "PilotToBook", "TurnTowardPose", "spine_marker_world_xy"]
