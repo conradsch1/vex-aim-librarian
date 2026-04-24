@@ -73,15 +73,36 @@ class PilotToArucoMarker(PilotToPose):
             markers = det.snapshot_seen_markers()
         else:
             markers = det.seen_marker_objects.copy()
-        if self.marker_id not in markers:
-            print(f"PilotToArucoMarker: marker id {self.marker_id} not in view")
-            self.punt_super_start()
-            self.post_failure()
-            return
-        self.target_object = self._world_object_for_marker_id()
-        self.target_pose = self._refine_target_pose(
-            self._world_pose_from_marker(markers[self.marker_id])
-        )
+
+        if self.marker_id in markers:
+            self.target_object = self._world_object_for_marker_id()
+            self.target_pose = self._refine_target_pose(
+                self._world_pose_from_marker(markers[self.marker_id])
+            )
+        else:
+            # Spine not in this frame (motion blur, angle, timing) but SLAM may still
+            # have a visible BookObj — navigate from map pose like PilotToPose(WorldObject).
+            map_obj = self._world_object_for_marker_id()
+            if isinstance(map_obj, BookObj) and map_obj.is_visible:
+                print(
+                    f"PilotToArucoMarker: marker {self.marker_id} not in snapshot; "
+                    "using BookObj map pose"
+                )
+                self.target_object = map_obj
+                bp = map_obj.pose
+                z = float(bp.z) if getattr(bp, "z", None) is not None else BookObj.HEIGHT_MM / 2
+                self.target_pose = self._refine_target_pose(
+                    Pose(float(bp.x), float(bp.y), z, nan)
+                )
+            else:
+                print(
+                    f"PilotToArucoMarker: marker id {self.marker_id} not in view "
+                    "and no visible BookObj on map"
+                )
+                self.punt_super_start()
+                self.post_failure()
+                return
+
         self.robot.rrt.max_iter = self.max_iter
         super(PilotToPose, self).start(event)
 

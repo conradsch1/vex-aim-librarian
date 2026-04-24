@@ -30,6 +30,7 @@ from math import nan, pi
 
 from aim_fsm import *
 from aim_fsm.particle import ArucoCombinedSensorModel
+from aim_fsm.pilot import PilotToPose
 
 from aim_librarian import BookObj, BOOK_FIRST_ID, install_librarian_extensions
 from aim_librarian.book_manip import AttachBook, DetachBookAtPose
@@ -97,6 +98,18 @@ class SwapBooksDemo(StateMachineProgram):
         self._pose0_a = book_center_pose(home_slot_a, tag_x_mm=_TAG_X)
         self._pose0_b = book_center_pose(home_slot_b, tag_x_mm=_TAG_X)
         self._pose_staging_a = book_center_pose(staging_slot, tag_x_mm=_TAG_X)
+        # Off-shelf "staging" location for parking book A between legs 1 and 3.
+        # Robot's initial x = 0 (world origin); staging book sits 140 mm south.
+        self._pose_staging_drop = Pose(0.0, -140.0, BookObj.HEIGHT_MM / 2.0, 0.0)
+        # Robot pose for dropping / re-picking the staging book: stand
+        # ROBOT_STANDOFF_MM north of the drop spot, facing south so the magnet
+        # (front of the robot) hovers over (0, -140).
+        self._pose_staging_robot = Pose(
+            self._pose_staging_drop.x,
+            self._pose_staging_drop.y + self.ROBOT_STANDOFF_MM,
+            0.0,
+            -pi / 2,
+        )
         # World-map keys (``.a`` suffix = "apparent") used by seed_world / detach.
         self._key_a = f"Book-{self.book_id_a}.a"
         self._key_b = f"Book-{self.book_id_b}.a"
@@ -233,28 +246,39 @@ class SwapBooksDemo(StateMachineProgram):
 
         # Back straight away from the shelf so we have room to pivot.
         retreat_stg: Forward(-self.SHELF_RETREAT_MM)
-        retreat_stg =C=> kick_a
+        retreat_stg =C=> turn_to_stg
         retreat_stg =F=> fail
 
-        # Kick the magnet to release the book.
-        kick_a: Kick()
-        kick_a =C=> turn_right
-        kick_a =F=> fail
+        # Face the staging drop spot before path-planning toward it.
+        turn_to_stg: TurnTowardPose(self._pose_staging_robot)
+        turn_to_stg =C=> pilot_to_stg
+        turn_to_stg =F=> fail
 
-        # turn to the right a little bit to avoid the book.
-        turn_right: Turn(90)
-        turn_right =C=> move_right
-        turn_right =F=> fail
+        # Drive to the standoff above the staging drop spot (magnet aligned with
+        # (0, -140)).  PilotToPose enforces the final heading (-pi/2).
+        pilot_to_stg: PilotToPose(self._pose_staging_robot)
+        pilot_to_stg =C=> drop_a
+        pilot_to_stg =F=> fail
 
-        # Move to the right a little bit to avoid the book.
-        move_right: Forward(50.0)
-        move_right =C=> turn_left
-        move_right =F=> fail
+        # Release the magnet so book A drops onto the staging spot.
+        drop_a: Kick()
+        drop_a =C=> detach_a
+        drop_a =F=> fail
 
-        # turn back to the left to face the staging standoff.
-        turn_left: Turn(-90)
-        turn_left =C=> p_b
-        turn_left =F=> fail
+        # Update the world map: book A now lives at the staging drop pose.
+        detach_a: DetachBookAtPose(self._pose_staging_drop)
+        detach_a =C=> post_drop_a
+        detach_a =F=> fail
+
+        # Small reverse nudge so the robot doesn't catch the dropped book on its way out.
+        post_drop_a: Forward(self.POST_DROP_CLEAR_MM)
+        post_drop_a =C=> turn_to_b_pre
+        post_drop_a =F=> fail
+
+        # Pivot to face the shelf so book B's spine marker is in the camera before p_b runs.
+        turn_to_b_pre: TurnTowardPose(self._pose0_b)
+        turn_to_b_pre =C=> p_b
+        turn_to_b_pre =F=> fail
 
         # ================================================================
         # LEG 2: Pick book B and drop it into book A's (now empty) slot.
@@ -280,13 +304,75 @@ class SwapBooksDemo(StateMachineProgram):
         turn_left2 =F=> fail
 
         move_forward2: Forward(100.0)
-        move_forward2 =C=> p_b
+        move_forward2 =C=> back_off_l3
         move_forward2 =F=> fail
 
         # ================================================================
-        # LEG 3: Pick book A from staging and drop it into book B's old slot.
-        # This completes the swap: A is where B was, B is where A was.
+        # LEG 3: Pick book A from the staging spot and drop it into book B's
+        # old slot.  This completes the swap: A is where B was, B is where A was.
+        # Staging sits at (initial_x, -140 mm) on the floor, so we can't reuse
+        # leg 2's small sidestep -- we navigate properly with PilotToPose.
         # ================================================================
+
+        # Back straight away from the shelf so we have room to pivot toward
+        # the staging area without scraping the freshly-placed book B.
+        back_off_l3: Forward(-self.SHELF_RETREAT_MM)
+        back_off_l3 =C=> turn_to_a3
+        back_off_l3 =F=> fail
+
+        # Face the staging drop spot so book A's spine marker is in the camera
+        # before PilotToBook tries to centroid on it.
+        turn_to_a3: TurnTowardPose(self._pose_staging_drop)
+        turn_to_a3 =C=> p_a3
+        turn_to_a3 =F=> fail
+
+        # Drive to the staging standoff and engage the magnet on book A.
+        p_a3: PilotToBook(self.book_id_a, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM)
+        p_a3 =C=> settle_a3
+        p_a3 =F=> fail
+
+        # Settle so the magnet grabs and the pose stabilizes before we commit.
+        settle_a3: StateNode() =T(0.4)=> att_a3
+
+        # Mark book A as "held by robot" in the world map.
+        att_a3: AttachBook(self.book_id_a)
+        att_a3 =C=> retreat_a3
+        att_a3 =F=> fail
+
+        # Back away from the staging area with book A on the magnet.
+        retreat_a3: Forward(-self.SHELF_RETREAT_MM)
+        retreat_a3 =C=> turn_to_slot_b
+        retreat_a3 =F=> fail
+
+        # Pivot toward slot B (book B's old, now-empty slot).
+        turn_to_slot_b: TurnTowardPose(self._pose0_b)
+        turn_to_slot_b =C=> pilot_to_slot_b
+        turn_to_slot_b =F=> fail
+
+        # Drive to the standoff in front of slot B.
+        pilot_to_slot_b: PilotToPose(self._robot_goal_for_book(self._pose0_b))
+        pilot_to_slot_b =C=> shove_b
+        pilot_to_slot_b =F=> fail
+
+        # Drive book A forward into slot B; the shelf strips it off the magnet.
+        shove_b: Forward(100.0)
+        shove_b =C=> drop_a3
+        shove_b =F=> fail
+
+        # Make sure the magnet has fully released book A in slot B.
+        drop_a3: Kick()
+        drop_a3 =C=> detach_a3
+        drop_a3 =F=> fail
+
+        # Update the world map: book A now lives in slot B's pose.
+        detach_a3: DetachBookAtPose(self._pose0_b)
+        detach_a3 =C=> post_drop_a3
+        detach_a3 =F=> fail
+
+        # Final reverse nudge so the robot doesn't catch the placed book.
+        post_drop_a3: Forward(self.POST_DROP_CLEAR_MM)
+        post_drop_a3 =C=> done
+        post_drop_a3 =F=> fail
 
         # --- Shared failure sink: any =F=> above lands here ---
         fail: Print("SwapBooksDemo: failed — localize, clear path, ensure markers in view. Tune ENGAGE_MM / standoff.") =N=> done

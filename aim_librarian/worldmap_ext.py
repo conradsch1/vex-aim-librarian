@@ -50,6 +50,19 @@ class LibrarianWorldMap(WorldMap):
             return
         super().confirm_still_holding()
 
+    def update_held_object(self):
+        """Move held book x,y with the robot (stock) and rotate spine θ with the robot."""
+        super().update_held_object()
+        h = self.robot.holding
+        if h is None or not isinstance(h, BookObj):
+            return
+        off = getattr(h, "_hold_theta_offset_rad", None)
+        if off is None:
+            # ``AttachBook`` should set this; infer once if a book was held without it.
+            h._hold_theta_offset_rad = wrap_angle(h.pose.theta - self.robot.pose.theta)
+            off = h._hold_theta_offset_rad
+        h.pose.theta = wrap_angle(self.robot.pose.theta + off)
+
     def make_new_aruco_objects(self):
         camera_offset_vector = np.array([0, 0, self.robot.kine.camera_from_origin])
         detector = self.robot.aruco_detector

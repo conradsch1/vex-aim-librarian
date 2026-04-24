@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from math import degrees
+
 from aim_fsm import StateNode
+from aim_fsm.geometry import wrap_angle
 from aim_fsm.utils import Pose
 
 from aim_librarian.books import BookObj
@@ -31,6 +34,9 @@ class AttachBook(StateNode):
             return
         self.robot.holding = obj
         obj.held_by = self.robot
+        # WorldMap ``update_held_object`` only moves x,y with the robot; spine yaw must
+        # follow turns. Store offset from robot heading so librarian map can update θ.
+        obj._hold_theta_offset_rad = wrap_angle(obj.pose.theta - self.robot.pose.theta)
         print(f"AttachBook: holding Book-{self.marker_id} (map state; magnet should be engaged)")
         self.post_completion()
 
@@ -52,13 +58,16 @@ class DetachBookAtPose(StateNode):
         held.pose.x = self.pose.x
         held.pose.y = self.pose.y
         held.pose.z = self.pose.z
-        if self.pose.theta is not None:
-            held.pose.theta = self.pose.theta
+        # θ was updated while held (``LibrarianWorldMap.update_held_object``); keep it so
+        # release matches physical spine direction after pivots. Do not snap to template.
+        if getattr(held, "_hold_theta_offset_rad", None) is not None:
+            delattr(held, "_hold_theta_offset_rad")
         held.held_by = None
         self.robot.holding = None
+        th_deg = degrees(held.pose.theta) if held.pose.theta is not None else float("nan")
         print(
             f"DetachBookAtPose: released Book-{held.marker_id} at "
-            f"({held.pose.x:.1f}, {held.pose.y:.1f}) mm"
+            f"({held.pose.x:.1f}, {held.pose.y:.1f}) mm, theta={th_deg:.1f} deg"
         )
         self.post_completion()
 

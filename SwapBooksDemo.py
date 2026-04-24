@@ -30,6 +30,7 @@ from math import nan, pi
 
 from aim_fsm import *
 from aim_fsm.particle import ArucoCombinedSensorModel
+from aim_fsm.pilot import PilotToPose
 
 from aim_librarian import BookObj, BOOK_FIRST_ID, install_librarian_extensions
 from aim_librarian.book_manip import AttachBook, DetachBookAtPose
@@ -97,6 +98,18 @@ class SwapBooksDemo(StateMachineProgram):
         self._pose0_a = book_center_pose(home_slot_a, tag_x_mm=_TAG_X)
         self._pose0_b = book_center_pose(home_slot_b, tag_x_mm=_TAG_X)
         self._pose_staging_a = book_center_pose(staging_slot, tag_x_mm=_TAG_X)
+        # Off-shelf "staging" location for parking book A between legs 1 and 3.
+        # Robot's initial x = 0 (world origin); staging book sits 140 mm south.
+        self._pose_staging_drop = Pose(0.0, -140.0, BookObj.HEIGHT_MM / 2.0, 0.0)
+        # Robot pose for dropping / re-picking the staging book: stand
+        # ROBOT_STANDOFF_MM north of the drop spot, facing south so the magnet
+        # (front of the robot) hovers over (0, -140).
+        self._pose_staging_robot = Pose(
+            self._pose_staging_drop.x,
+            self._pose_staging_drop.y + self.ROBOT_STANDOFF_MM,
+            0.0,
+            -pi / 2,
+        )
         # World-map keys (``.a`` suffix = "apparent") used by seed_world / detach.
         self._key_a = f"Book-{self.book_id_a}.a"
         self._key_b = f"Book-{self.book_id_b}.a"
@@ -233,28 +246,39 @@ class SwapBooksDemo(StateMachineProgram):
         # 
         #         # Back straight away from the shelf so we have room to pivot.
         #         retreat_stg: Forward(-self.SHELF_RETREAT_MM)
-        #         retreat_stg =C=> kick_a
+        #         retreat_stg =C=> turn_to_stg
         #         retreat_stg =F=> fail
         # 
-        #         # Kick the magnet to release the book.
-        #         kick_a: Kick()
-        #         kick_a =C=> turn_right
-        #         kick_a =F=> fail
+        #         # Face the staging drop spot before path-planning toward it.
+        #         turn_to_stg: TurnTowardPose(self._pose_staging_robot)
+        #         turn_to_stg =C=> pilot_to_stg
+        #         turn_to_stg =F=> fail
         # 
-        #         # turn to the right a little bit to avoid the book.
-        #         turn_right: Turn(90)
-        #         turn_right =C=> move_right
-        #         turn_right =F=> fail
+        #         # Drive to the standoff above the staging drop spot (magnet aligned with
+        #         # (0, -140)).  PilotToPose enforces the final heading (-pi/2).
+        #         pilot_to_stg: PilotToPose(self._pose_staging_robot)
+        #         pilot_to_stg =C=> drop_a
+        #         pilot_to_stg =F=> fail
         # 
-        #         # Move to the right a little bit to avoid the book.
-        #         move_right: Forward(50.0)
-        #         move_right =C=> turn_left
-        #         move_right =F=> fail
+        #         # Release the magnet so book A drops onto the staging spot.
+        #         drop_a: Kick()
+        #         drop_a =C=> detach_a
+        #         drop_a =F=> fail
         # 
-        #         # turn back to the left to face the staging standoff.
-        #         turn_left: Turn(-90)
-        #         turn_left =C=> p_b
-        #         turn_left =F=> fail
+        #         # Update the world map: book A now lives at the staging drop pose.
+        #         detach_a: DetachBookAtPose(self._pose_staging_drop)
+        #         detach_a =C=> post_drop_a
+        #         detach_a =F=> fail
+        # 
+        #         # Small reverse nudge so the robot doesn't catch the dropped book on its way out.
+        #         post_drop_a: Forward(self.POST_DROP_CLEAR_MM)
+        #         post_drop_a =C=> turn_to_b_pre
+        #         post_drop_a =F=> fail
+        # 
+        #         # Pivot to face the shelf so book B's spine marker is in the camera before p_b runs.
+        #         turn_to_b_pre: TurnTowardPose(self._pose0_b)
+        #         turn_to_b_pre =C=> p_b
+        #         turn_to_b_pre =F=> fail
         # 
         #         # ================================================================
         #         # LEG 2: Pick book B and drop it into book A's (now empty) slot.
@@ -280,20 +304,82 @@ class SwapBooksDemo(StateMachineProgram):
         #         turn_left2 =F=> fail
         # 
         #         move_forward2: Forward(100.0)
-        #         move_forward2 =C=> p_b
+        #         move_forward2 =C=> back_off_l3
         #         move_forward2 =F=> fail
         # 
         #         # ================================================================
-        #         # LEG 3: Pick book A from staging and drop it into book B's old slot.
-        #         # This completes the swap: A is where B was, B is where A was.
+        #         # LEG 3: Pick book A from the staging spot and drop it into book B's
+        #         # old slot.  This completes the swap: A is where B was, B is where A was.
+        #         # Staging sits at (initial_x, -140 mm) on the floor, so we can't reuse
+        #         # leg 2's small sidestep -- we navigate properly with PilotToPose.
         #         # ================================================================
+        # 
+        #         # Back straight away from the shelf so we have room to pivot toward
+        #         # the staging area without scraping the freshly-placed book B.
+        #         back_off_l3: Forward(-self.SHELF_RETREAT_MM)
+        #         back_off_l3 =C=> turn_to_a3
+        #         back_off_l3 =F=> fail
+        # 
+        #         # Face the staging drop spot so book A's spine marker is in the camera
+        #         # before PilotToBook tries to centroid on it.
+        #         turn_to_a3: TurnTowardPose(self._pose_staging_drop)
+        #         turn_to_a3 =C=> p_a3
+        #         turn_to_a3 =F=> fail
+        # 
+        #         # Drive to the staging standoff and engage the magnet on book A.
+        #         p_a3: PilotToBook(self.book_id_a, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM)
+        #         p_a3 =C=> settle_a3
+        #         p_a3 =F=> fail
+        # 
+        #         # Settle so the magnet grabs and the pose stabilizes before we commit.
+        #         settle_a3: StateNode() =T(0.4)=> att_a3
+        # 
+        #         # Mark book A as "held by robot" in the world map.
+        #         att_a3: AttachBook(self.book_id_a)
+        #         att_a3 =C=> retreat_a3
+        #         att_a3 =F=> fail
+        # 
+        #         # Back away from the staging area with book A on the magnet.
+        #         retreat_a3: Forward(-self.SHELF_RETREAT_MM)
+        #         retreat_a3 =C=> turn_to_slot_b
+        #         retreat_a3 =F=> fail
+        # 
+        #         # Pivot toward slot B (book B's old, now-empty slot).
+        #         turn_to_slot_b: TurnTowardPose(self._pose0_b)
+        #         turn_to_slot_b =C=> pilot_to_slot_b
+        #         turn_to_slot_b =F=> fail
+        # 
+        #         # Drive to the standoff in front of slot B.
+        #         pilot_to_slot_b: PilotToPose(self._robot_goal_for_book(self._pose0_b))
+        #         pilot_to_slot_b =C=> shove_b
+        #         pilot_to_slot_b =F=> fail
+        # 
+        #         # Drive book A forward into slot B; the shelf strips it off the magnet.
+        #         shove_b: Forward(100.0)
+        #         shove_b =C=> drop_a3
+        #         shove_b =F=> fail
+        # 
+        #         # Make sure the magnet has fully released book A in slot B.
+        #         drop_a3: Kick()
+        #         drop_a3 =C=> detach_a3
+        #         drop_a3 =F=> fail
+        # 
+        #         # Update the world map: book A now lives in slot B's pose.
+        #         detach_a3: DetachBookAtPose(self._pose0_b)
+        #         detach_a3 =C=> post_drop_a3
+        #         detach_a3 =F=> fail
+        # 
+        #         # Final reverse nudge so the robot doesn't catch the placed book.
+        #         post_drop_a3: Forward(self.POST_DROP_CLEAR_MM)
+        #         post_drop_a3 =C=> done
+        #         post_drop_a3 =F=> fail
         # 
         #         # --- Shared failure sink: any =F=> above lands here ---
         #         fail: Print("SwapBooksDemo: failed — localize, clear path, ensure markers in view. Tune ENGAGE_MM / standoff.") =N=> done
         # 
         #         done: ParentCompletes()
         
-        # Code generated by genfsm on Thu Apr 23 19:49:07 2026:
+        # Code generated by genfsm on Thu Apr 23 20:19:31 2026:
         
         prompt = Print("SwapBooksDemo: LOCALIZED, cameras see spines. Type start — magnet swap runs.") .set_name("prompt") .set_parent(self)
         wait = StateNode() .set_name("wait") .set_parent(self)
@@ -301,16 +387,30 @@ class SwapBooksDemo(StateMachineProgram):
         settle_a = StateNode() .set_name("settle_a") .set_parent(self)
         att_a = AttachBook(self.book_id_a) .set_name("att_a") .set_parent(self)
         retreat_stg = Forward(-self.SHELF_RETREAT_MM) .set_name("retreat_stg") .set_parent(self)
-        kick_a = Kick() .set_name("kick_a") .set_parent(self)
-        turn_right = Turn(90) .set_name("turn_right") .set_parent(self)
-        move_right = Forward(50.0) .set_name("move_right") .set_parent(self)
-        turn_left = Turn(-90) .set_name("turn_left") .set_parent(self)
+        turn_to_stg = TurnTowardPose(self._pose_staging_robot) .set_name("turn_to_stg") .set_parent(self)
+        pilot_to_stg = PilotToPose(self._pose_staging_robot) .set_name("pilot_to_stg") .set_parent(self)
+        drop_a = Kick() .set_name("drop_a") .set_parent(self)
+        detach_a = DetachBookAtPose(self._pose_staging_drop) .set_name("detach_a") .set_parent(self)
+        post_drop_a = Forward(self.POST_DROP_CLEAR_MM) .set_name("post_drop_a") .set_parent(self)
+        turn_to_b_pre = TurnTowardPose(self._pose0_b) .set_name("turn_to_b_pre") .set_parent(self)
         p_b = PilotToBook(self.book_id_b, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM) .set_name("p_b") .set_parent(self)
         back_up2 = Forward(-100.0) .set_name("back_up2") .set_parent(self)
         turn_right2 = Turn(-90) .set_name("turn_right2") .set_parent(self)
         move_right2 = Forward(50.0) .set_name("move_right2") .set_parent(self)
         turn_left2 = Turn(90) .set_name("turn_left2") .set_parent(self)
         move_forward2 = Forward(100.0) .set_name("move_forward2") .set_parent(self)
+        back_off_l3 = Forward(-self.SHELF_RETREAT_MM) .set_name("back_off_l3") .set_parent(self)
+        turn_to_a3 = TurnTowardPose(self._pose_staging_drop) .set_name("turn_to_a3") .set_parent(self)
+        p_a3 = PilotToBook(self.book_id_a, book_approach_offset_mm=self.BOOK_APPROACH_OFFSET_MM) .set_name("p_a3") .set_parent(self)
+        settle_a3 = StateNode() .set_name("settle_a3") .set_parent(self)
+        att_a3 = AttachBook(self.book_id_a) .set_name("att_a3") .set_parent(self)
+        retreat_a3 = Forward(-self.SHELF_RETREAT_MM) .set_name("retreat_a3") .set_parent(self)
+        turn_to_slot_b = TurnTowardPose(self._pose0_b) .set_name("turn_to_slot_b") .set_parent(self)
+        pilot_to_slot_b = PilotToPose(self._robot_goal_for_book(self._pose0_b)) .set_name("pilot_to_slot_b") .set_parent(self)
+        shove_b = Forward(100.0) .set_name("shove_b") .set_parent(self)
+        drop_a3 = Kick() .set_name("drop_a3") .set_parent(self)
+        detach_a3 = DetachBookAtPose(self._pose0_b) .set_name("detach_a3") .set_parent(self)
+        post_drop_a3 = Forward(self.POST_DROP_CLEAR_MM) .set_name("post_drop_a3") .set_parent(self)
         fail = Print("SwapBooksDemo: failed — localize, clear path, ensure markers in view. Tune ENGAGE_MM / standoff.") .set_name("fail") .set_parent(self)
         done = ParentCompletes() .set_name("done") .set_parent(self)
         
@@ -336,70 +436,151 @@ class SwapBooksDemo(StateMachineProgram):
         failuretrans2 .add_sources(att_a) .add_destinations(fail)
         
         completiontrans3 = CompletionTrans() .set_name("completiontrans3")
-        completiontrans3 .add_sources(retreat_stg) .add_destinations(kick_a)
+        completiontrans3 .add_sources(retreat_stg) .add_destinations(turn_to_stg)
         
         failuretrans3 = FailureTrans() .set_name("failuretrans3")
         failuretrans3 .add_sources(retreat_stg) .add_destinations(fail)
         
         completiontrans4 = CompletionTrans() .set_name("completiontrans4")
-        completiontrans4 .add_sources(kick_a) .add_destinations(turn_right)
+        completiontrans4 .add_sources(turn_to_stg) .add_destinations(pilot_to_stg)
         
         failuretrans4 = FailureTrans() .set_name("failuretrans4")
-        failuretrans4 .add_sources(kick_a) .add_destinations(fail)
+        failuretrans4 .add_sources(turn_to_stg) .add_destinations(fail)
         
         completiontrans5 = CompletionTrans() .set_name("completiontrans5")
-        completiontrans5 .add_sources(turn_right) .add_destinations(move_right)
+        completiontrans5 .add_sources(pilot_to_stg) .add_destinations(drop_a)
         
         failuretrans5 = FailureTrans() .set_name("failuretrans5")
-        failuretrans5 .add_sources(turn_right) .add_destinations(fail)
+        failuretrans5 .add_sources(pilot_to_stg) .add_destinations(fail)
         
         completiontrans6 = CompletionTrans() .set_name("completiontrans6")
-        completiontrans6 .add_sources(move_right) .add_destinations(turn_left)
+        completiontrans6 .add_sources(drop_a) .add_destinations(detach_a)
         
         failuretrans6 = FailureTrans() .set_name("failuretrans6")
-        failuretrans6 .add_sources(move_right) .add_destinations(fail)
+        failuretrans6 .add_sources(drop_a) .add_destinations(fail)
         
         completiontrans7 = CompletionTrans() .set_name("completiontrans7")
-        completiontrans7 .add_sources(turn_left) .add_destinations(p_b)
+        completiontrans7 .add_sources(detach_a) .add_destinations(post_drop_a)
         
         failuretrans7 = FailureTrans() .set_name("failuretrans7")
-        failuretrans7 .add_sources(turn_left) .add_destinations(fail)
+        failuretrans7 .add_sources(detach_a) .add_destinations(fail)
         
         completiontrans8 = CompletionTrans() .set_name("completiontrans8")
-        completiontrans8 .add_sources(p_b) .add_destinations(back_up2)
+        completiontrans8 .add_sources(post_drop_a) .add_destinations(turn_to_b_pre)
         
         failuretrans8 = FailureTrans() .set_name("failuretrans8")
-        failuretrans8 .add_sources(p_b) .add_destinations(fail)
+        failuretrans8 .add_sources(post_drop_a) .add_destinations(fail)
         
         completiontrans9 = CompletionTrans() .set_name("completiontrans9")
-        completiontrans9 .add_sources(back_up2) .add_destinations(turn_right2)
+        completiontrans9 .add_sources(turn_to_b_pre) .add_destinations(p_b)
         
         failuretrans9 = FailureTrans() .set_name("failuretrans9")
-        failuretrans9 .add_sources(back_up2) .add_destinations(fail)
+        failuretrans9 .add_sources(turn_to_b_pre) .add_destinations(fail)
         
         completiontrans10 = CompletionTrans() .set_name("completiontrans10")
-        completiontrans10 .add_sources(turn_right2) .add_destinations(move_right2)
+        completiontrans10 .add_sources(p_b) .add_destinations(back_up2)
         
         failuretrans10 = FailureTrans() .set_name("failuretrans10")
-        failuretrans10 .add_sources(turn_right2) .add_destinations(fail)
+        failuretrans10 .add_sources(p_b) .add_destinations(fail)
         
         completiontrans11 = CompletionTrans() .set_name("completiontrans11")
-        completiontrans11 .add_sources(move_right2) .add_destinations(turn_left2)
+        completiontrans11 .add_sources(back_up2) .add_destinations(turn_right2)
         
         failuretrans11 = FailureTrans() .set_name("failuretrans11")
-        failuretrans11 .add_sources(move_right2) .add_destinations(fail)
+        failuretrans11 .add_sources(back_up2) .add_destinations(fail)
         
         completiontrans12 = CompletionTrans() .set_name("completiontrans12")
-        completiontrans12 .add_sources(turn_left2) .add_destinations(move_forward2)
+        completiontrans12 .add_sources(turn_right2) .add_destinations(move_right2)
         
         failuretrans12 = FailureTrans() .set_name("failuretrans12")
-        failuretrans12 .add_sources(turn_left2) .add_destinations(fail)
+        failuretrans12 .add_sources(turn_right2) .add_destinations(fail)
         
         completiontrans13 = CompletionTrans() .set_name("completiontrans13")
-        completiontrans13 .add_sources(move_forward2) .add_destinations(p_b)
+        completiontrans13 .add_sources(move_right2) .add_destinations(turn_left2)
         
         failuretrans13 = FailureTrans() .set_name("failuretrans13")
-        failuretrans13 .add_sources(move_forward2) .add_destinations(fail)
+        failuretrans13 .add_sources(move_right2) .add_destinations(fail)
+        
+        completiontrans14 = CompletionTrans() .set_name("completiontrans14")
+        completiontrans14 .add_sources(turn_left2) .add_destinations(move_forward2)
+        
+        failuretrans14 = FailureTrans() .set_name("failuretrans14")
+        failuretrans14 .add_sources(turn_left2) .add_destinations(fail)
+        
+        completiontrans15 = CompletionTrans() .set_name("completiontrans15")
+        completiontrans15 .add_sources(move_forward2) .add_destinations(back_off_l3)
+        
+        failuretrans15 = FailureTrans() .set_name("failuretrans15")
+        failuretrans15 .add_sources(move_forward2) .add_destinations(fail)
+        
+        completiontrans16 = CompletionTrans() .set_name("completiontrans16")
+        completiontrans16 .add_sources(back_off_l3) .add_destinations(turn_to_a3)
+        
+        failuretrans16 = FailureTrans() .set_name("failuretrans16")
+        failuretrans16 .add_sources(back_off_l3) .add_destinations(fail)
+        
+        completiontrans17 = CompletionTrans() .set_name("completiontrans17")
+        completiontrans17 .add_sources(turn_to_a3) .add_destinations(p_a3)
+        
+        failuretrans17 = FailureTrans() .set_name("failuretrans17")
+        failuretrans17 .add_sources(turn_to_a3) .add_destinations(fail)
+        
+        completiontrans18 = CompletionTrans() .set_name("completiontrans18")
+        completiontrans18 .add_sources(p_a3) .add_destinations(settle_a3)
+        
+        failuretrans18 = FailureTrans() .set_name("failuretrans18")
+        failuretrans18 .add_sources(p_a3) .add_destinations(fail)
+        
+        timertrans2 = TimerTrans(0.4) .set_name("timertrans2")
+        timertrans2 .add_sources(settle_a3) .add_destinations(att_a3)
+        
+        completiontrans19 = CompletionTrans() .set_name("completiontrans19")
+        completiontrans19 .add_sources(att_a3) .add_destinations(retreat_a3)
+        
+        failuretrans19 = FailureTrans() .set_name("failuretrans19")
+        failuretrans19 .add_sources(att_a3) .add_destinations(fail)
+        
+        completiontrans20 = CompletionTrans() .set_name("completiontrans20")
+        completiontrans20 .add_sources(retreat_a3) .add_destinations(turn_to_slot_b)
+        
+        failuretrans20 = FailureTrans() .set_name("failuretrans20")
+        failuretrans20 .add_sources(retreat_a3) .add_destinations(fail)
+        
+        completiontrans21 = CompletionTrans() .set_name("completiontrans21")
+        completiontrans21 .add_sources(turn_to_slot_b) .add_destinations(pilot_to_slot_b)
+        
+        failuretrans21 = FailureTrans() .set_name("failuretrans21")
+        failuretrans21 .add_sources(turn_to_slot_b) .add_destinations(fail)
+        
+        completiontrans22 = CompletionTrans() .set_name("completiontrans22")
+        completiontrans22 .add_sources(pilot_to_slot_b) .add_destinations(shove_b)
+        
+        failuretrans22 = FailureTrans() .set_name("failuretrans22")
+        failuretrans22 .add_sources(pilot_to_slot_b) .add_destinations(fail)
+        
+        completiontrans23 = CompletionTrans() .set_name("completiontrans23")
+        completiontrans23 .add_sources(shove_b) .add_destinations(drop_a3)
+        
+        failuretrans23 = FailureTrans() .set_name("failuretrans23")
+        failuretrans23 .add_sources(shove_b) .add_destinations(fail)
+        
+        completiontrans24 = CompletionTrans() .set_name("completiontrans24")
+        completiontrans24 .add_sources(drop_a3) .add_destinations(detach_a3)
+        
+        failuretrans24 = FailureTrans() .set_name("failuretrans24")
+        failuretrans24 .add_sources(drop_a3) .add_destinations(fail)
+        
+        completiontrans25 = CompletionTrans() .set_name("completiontrans25")
+        completiontrans25 .add_sources(detach_a3) .add_destinations(post_drop_a3)
+        
+        failuretrans25 = FailureTrans() .set_name("failuretrans25")
+        failuretrans25 .add_sources(detach_a3) .add_destinations(fail)
+        
+        completiontrans26 = CompletionTrans() .set_name("completiontrans26")
+        completiontrans26 .add_sources(post_drop_a3) .add_destinations(done)
+        
+        failuretrans26 = FailureTrans() .set_name("failuretrans26")
+        failuretrans26 .add_sources(post_drop_a3) .add_destinations(fail)
         
         nulltrans2 = NullTrans() .set_name("nulltrans2")
         nulltrans2 .add_sources(fail) .add_destinations(done)

@@ -1,4 +1,8 @@
-"""Extend aim_fsm RRT with book obstacles (no changes inside vex-aim-tools)."""
+"""Extend aim_fsm RRT with book obstacles (no changes inside vex-aim-tools).
+
+Books and fixed ArUco markers use capped RRT inflation so PathPlanner's default
+~15 mm margin does not block tight shelf navigation; tune ``BOOK_RRT_MAX_BOOK_INFLATION_MM``.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +23,12 @@ from aim_fsm.worldmap import (
 )
 
 from aim_librarian.books import BookObj
+
+# PathPlanner / Pilot pass ``skinny_obstacle_inflation`` (~15 mm). Book rectangles
+# already use spine × cover; adding the full margin makes adjacent slots overlap and
+# blocks shelf approaches. Clamp book-only inflation here (mm); raise slightly if the
+# planner clips real geometry.
+BOOK_RRT_MAX_BOOK_INFLATION_MM = 0
 
 _orig_generate_obstacles: Callable[..., None] | None = None
 _orig_compute_bounding_box: Callable[..., Any] | None = None
@@ -58,9 +68,14 @@ def _librarian_generate_obstacles(self, goal_object, obstacle_inflation=0, wall_
             obstacles += obsts
             obst = None
         elif isinstance(obj, ArucoMarkerObj):
-            obst = self.generate_aruco_obstacle(obj, obstacle_inflation)
+            # Fixed corner ArUco boxes: PathPlanner/Pilot pass large ``obstacle_inflation``
+            # (e.g. 15 mm). Inflated marker rectangles overlap shelf approach lanes and cause
+            # GoalCollides when routing to books near the shelf line. Use the physical tag
+            # footprint only (no inflation margin).
+            obst = self.generate_aruco_obstacle(obj, 0)
         elif isinstance(obj, BookObj):
-            obst = generate_book_obstacle(obj, obstacle_inflation)
+            book_infl = min(obstacle_inflation, BOOK_RRT_MAX_BOOK_INFLATION_MM)
+            obst = generate_book_obstacle(obj, book_infl)
         elif isinstance(obj, DoorwayObj):
             obst = None
         else:
