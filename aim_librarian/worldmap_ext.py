@@ -122,6 +122,130 @@ def ensure_bookobj_from_vision(robot, marker_id: int) -> BookObj | None:
     return obj
 
 
+def ensure_patron_return_staging_bookobj(
+    robot,
+    x_mm: float,
+    y_mm: float,
+    marker_id: int,
+) -> BookObj:
+    """Place a :class:`BookObj` at the fixed patron staging pose if none exists for ``marker_id``.
+
+    ``#returnbook`` can start before ``process_unassociated_objects`` has promoted a spine to
+    the map, or while the particle filter is LOST, so :class:`PilotToBook` would otherwise
+    have no goal. Vision updates will later refresh this pose when the tag is seen.
+    """
+    if not is_book_aruco_id(marker_id):
+        raise ValueError(
+            f"ensure_patron_return_staging_bookobj: marker_id {marker_id} is not a book spine id"
+        )
+    wm = robot.world_map
+    with wm._lock:
+        for obj in wm.objects.values():
+            if isinstance(obj, BookObj) and obj.marker_id == marker_id:
+                return obj
+
+    name = f"Book-{marker_id}"
+    spec = {"name": name, "id": marker_id, "marker": None}
+    obj = BookObj(spec)
+    obj.pose = PoseEstimate(
+        float(x_mm), float(y_mm), BookObj.HEIGHT_MM / 2, 0.0
+    )
+    obj.is_visible = True
+    obj.is_missing = False
+    obj.pose_confidence = +1
+
+    with wm._lock:
+        for o in wm.objects.values():
+            if isinstance(o, BookObj) and o.marker_id == marker_id:
+                return o
+        obj_id = wm.next_in_sequence(name)
+        wm.objects[obj_id] = obj
+    print(
+        f"ensure_patron_return_staging_bookobj: inserted {obj_id} at layout pose "
+        f"({x_mm:.1f}, {y_mm:.1f}) mm — prior map had no Book-{marker_id}"
+    )
+    return obj
+
+
+def _marker_world_xy_mm(robot, marker) -> tuple[float, float]:
+    """World *(x, y)* in mm for a marker detection (same geometry as :func:`ensure_bookobj_from_vision`)."""
+    camera_offset_vector = np.array([0, 0, robot.kine.camera_from_origin])
+    sensor_coords = marker.camera_coords + camera_offset_vector
+    sensor_distance = math.sqrt(sensor_coords[0] ** 2 + sensor_coords[2] ** 2)
+    sensor_bearing = math.atan2(sensor_coords[0], sensor_coords[2])
+    theta = robot.pose.theta
+    x = robot.pose.x + sensor_distance * math.cos(theta + sensor_bearing)
+    y = robot.pose.y + sensor_distance * math.sin(theta + sensor_bearing)
+    return x, y
+
+
+def pick_return_staging_book_marker_id(
+    robot,
+    staging_x_mm: float,
+    staging_y_mm: float,
+    candidate_marker_ids: tuple[int, ...],
+) -> int:
+    """Pick which spine id among ``candidate_marker_ids`` to approach for patron staging pickup.
+
+    Chooses the **nearest** eligible :class:`BookObj` on the map (among ``candidate_marker_ids``,
+    not ``held_by``) to the layout staging pose—**no maximum-distance requirement**. If the map
+    has no match, uses the same rule on the live Aruco snapshot (projected to world mm). If
+    still nothing is known, returns the first id in ``candidate_marker_ids`` (spine **9** on this
+    field; physical staging is assumed).
+    """
+    best_id: int | None = None
+    best_d2 = float("inf")
+
+    for obj in robot.world_map.objects.values():
+        if not isinstance(obj, BookObj):
+            continue
+        if obj.marker_id not in candidate_marker_ids:
+            continue
+        if obj.held_by is not None:
+            continue
+        dx = float(obj.pose.x) - staging_x_mm
+        dy = float(obj.pose.y) - staging_y_mm
+        d2 = dx * dx + dy * dy
+        if best_id is None or d2 < best_d2 or (d2 == best_d2 and obj.marker_id < best_id):
+            best_d2 = d2
+            best_id = obj.marker_id
+
+    if best_id is not None:
+        return best_id
+
+    det = getattr(robot, "aruco_detector", None)
+    seen_markers: dict = {}
+    if det is not None:
+        if hasattr(det, "snapshot_seen_markers"):
+            seen_markers = det.snapshot_seen_markers()
+        else:
+            seen_markers = det.seen_marker_objects.copy()
+
+    best_id = None
+    best_d2 = float("inf")
+    for mid in candidate_marker_ids:
+        marker = seen_markers.get(mid)
+        if marker is None:
+            continue
+        x, y = _marker_world_xy_mm(robot, marker)
+        dx = x - staging_x_mm
+        dy = y - staging_y_mm
+        d2 = dx * dx + dy * dy
+        if best_id is None or d2 < best_d2 or (d2 == best_d2 and mid < best_id):
+            best_d2 = d2
+            best_id = mid
+
+    if best_id is not None:
+        return best_id
+
+    fallback = candidate_marker_ids[0]
+    print(
+        "pick_return_staging_book_marker_id: no map/vision candidate — "
+        f"assuming staging book spine {fallback}"
+    )
+    return fallback
+
+
 def prune_aruco_markers_in_book_id_range(world_map: WorldMap) -> None:
     """Drop legacy :class:`ArucoMarkerObj` entries whose ids are modeled as books.
 
@@ -250,5 +374,7 @@ __all__ = [
     "LibrarianWorldMap",
     "_migrate_world_map",
     "ensure_bookobj_from_vision",
+    "ensure_patron_return_staging_bookobj",
+    "pick_return_staging_book_marker_id",
     "prune_aruco_markers_in_book_id_range",
 ]

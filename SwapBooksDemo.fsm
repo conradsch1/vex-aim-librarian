@@ -24,7 +24,7 @@ Regenerate Python with::
 
 from __future__ import annotations
 
-from math import nan, pi
+from math import nan, pi, radians
 
 from aim_fsm import *
 from aim_fsm.particle import ArucoCombinedSensorModel
@@ -39,6 +39,22 @@ from aim_librarian.pilot_ext import PilotToBook, TurnTowardPose
 _TAG_Y = 138
 _TAG_X = 175
 BOX_WIDTH = 35
+
+# Match ``CelesteLibrarian``: field shift (−3 cm X/Y); marker 16: X = −3 cm; Y and theta = marker 20.
+SETUP_SHIFT_X_MM = -30.0
+SETUP_SHIFT_Y_MM = -30.0
+HOMING_MARKER16_X_MM = -30.0
+
+
+def marker20_y_mm() -> float:
+    return _TAG_Y - BOX_WIDTH / 2 + SETUP_SHIFT_Y_MM
+
+
+HOMING_MARKER_ID_SEED = 16
+
+# Match ``CelesteLibrarian.HOMING_DELTA_*``: corner robot start −1 cm in X, +14.5 cm in Y.
+HOMING_DELTA_X_MM = -10.0
+HOMING_DELTA_Y_MM = 145.0
 
 
 class SwapBooksDemo(StateMachineProgram):
@@ -74,9 +90,19 @@ class SwapBooksDemo(StateMachineProgram):
         # Books sit on the shelf with their center 45 mm inboard of the tag row.
         # ``theta = pi`` means the spine faces the robot's approach direction (-X).
         z_book = BookObj.HEIGHT_MM / 2
-        shelf_x = _TAG_X - 45.0
-        self._pose0_a = Pose(shelf_x, 15.0, z_book, pi)   # book A's home slot
-        self._pose0_b = Pose(shelf_x, -15.0, z_book, pi)  # book B's home slot
+        shelf_x = _TAG_X - 45.0 + SETUP_SHIFT_X_MM
+        self._pose0_a = Pose(
+            shelf_x + HOMING_DELTA_X_MM,
+            15.0 + HOMING_DELTA_Y_MM + SETUP_SHIFT_Y_MM,
+            z_book,
+            pi,
+        )  # book A's home slot
+        self._pose0_b = Pose(
+            shelf_x + HOMING_DELTA_X_MM,
+            -15.0 + HOMING_DELTA_Y_MM + SETUP_SHIFT_Y_MM,
+            z_book,
+            pi,
+        )  # book B's home slot
         # Temporary parking pose for A while B is being moved; offset in +Y from A's slot.
         self._pose_staging_a = Pose(
             self._pose0_a.x,
@@ -90,11 +116,17 @@ class SwapBooksDemo(StateMachineProgram):
 
         # Ground-truth poses of the four corner ArUco tags, fed to the particle
         # filter so SLAM can localize the robot the instant it sees any tag.
+        sx = SETUP_SHIFT_X_MM
+        sy = SETUP_SHIFT_Y_MM
+        m18_x = _TAG_X - BOX_WIDTH / 2 + sx
+        m18_y = -_TAG_Y + sy
+        m20_y = marker20_y_mm()
         landmarks = {
-            "ArucoMarker-17": Pose(_TAG_X - BOX_WIDTH / 2, _TAG_Y, 5, 90),
-            "ArucoMarker-18": Pose(_TAG_X - BOX_WIDTH / 2, -_TAG_Y, 5, 270),
-            "ArucoMarker-19": Pose(_TAG_X, -_TAG_Y + BOX_WIDTH / 2, 5, 180),
-            "ArucoMarker-20": Pose(_TAG_X, _TAG_Y - BOX_WIDTH / 2, 5, 180),
+            "ArucoMarker-17": Pose(_TAG_X - BOX_WIDTH / 2 + sx, _TAG_Y + sy, 5, radians(90)),
+            "ArucoMarker-18": Pose(m18_x, m18_y, 5, radians(270)),
+            "ArucoMarker-19": Pose(_TAG_X + sx, -_TAG_Y + BOX_WIDTH / 2 + sy, 5, radians(180)),
+            "ArucoMarker-20": Pose(_TAG_X + sx, m20_y, 5, radians(180)),
+            "ArucoMarker-16": Pose(HOMING_MARKER16_X_MM, m20_y, 5, radians(180)),
         }
         pf = ParticleFilter(
             robot,
@@ -139,33 +171,47 @@ class SwapBooksDemo(StateMachineProgram):
         self.robot.world_map.objects[self._key_a] = ba
         self.robot.world_map.objects[self._key_b] = bb
 
+        sx = SETUP_SHIFT_X_MM
+        sy = SETUP_SHIFT_Y_MM
+        m18_x = _TAG_X - BOX_WIDTH / 2 + sx
+        m18_y = -_TAG_Y + sy
+        m20_y = marker20_y_mm()
         m17 = ArucoMarkerObj(
             {"name": "ArucoMarker-17", "id": 17, "marker": None},
-            x=_TAG_X - BOX_WIDTH / 2,
-            y=_TAG_Y,
-            theta=pi / 2,
+            x=_TAG_X - BOX_WIDTH / 2 + sx,
+            y=_TAG_Y + sy,
+            theta=radians(90),
         )
         m18 = ArucoMarkerObj(
             {"name": "ArucoMarker-18", "id": 18, "marker": None},
-            x=_TAG_X - BOX_WIDTH / 2,
-            y=-_TAG_Y,
-            theta=3 * pi / 2,
+            x=m18_x,
+            y=m18_y,
+            theta=radians(270),
         )
         m17.is_fixed = True
         m18.is_fixed = True
         self.robot.world_map.objects["ArucoMarker-17.a"] = m17
         self.robot.world_map.objects["ArucoMarker-18.a"] = m18
+        m16 = ArucoMarkerObj(
+            {"name": f"ArucoMarker-{HOMING_MARKER_ID_SEED}", "id": HOMING_MARKER_ID_SEED, "marker": None},
+            x=HOMING_MARKER16_X_MM,
+            y=m20_y,
+            z=5,
+            theta=radians(180),
+        )
+        m16.is_fixed = True
+        self.robot.world_map.objects[f"ArucoMarker-{HOMING_MARKER_ID_SEED}.a"] = m16
         m19 = ArucoMarkerObj(
             {"name": "ArucoMarker-19", "id": 19, "marker": None},
-            x=_TAG_X,
-            y=-_TAG_Y + BOX_WIDTH / 2,
-            theta=pi,
+            x=_TAG_X + sx,
+            y=-_TAG_Y + BOX_WIDTH / 2 + sy,
+            theta=radians(180),
         )
         m20 = ArucoMarkerObj(
             {"name": "ArucoMarker-20", "id": 20, "marker": None},
-            x=_TAG_X,
-            y=_TAG_Y - BOX_WIDTH / 2,
-            theta=pi,
+            x=_TAG_X + sx,
+            y=m20_y,
+            theta=radians(180),
         )
         m19.is_fixed = True
         m20.is_fixed = True
@@ -182,8 +228,13 @@ class SwapBooksDemo(StateMachineProgram):
 
     def _pose_survey(self) -> Pose:
         """Pose between shelf slots and back from the row so both spines can be in view."""
-        shelf_x = _TAG_X - 45.0
-        return Pose(shelf_x - 185.0, 0.0, 0.0, 0.0)
+        shelf_x = _TAG_X - 45.0 + SETUP_SHIFT_X_MM
+        return Pose(
+            shelf_x - 185.0 + HOMING_DELTA_X_MM,
+            HOMING_DELTA_Y_MM + SETUP_SHIFT_Y_MM,
+            0.0,
+            0.0,
+        )
 
     # ------------------------------------------------------------------
     # State graph

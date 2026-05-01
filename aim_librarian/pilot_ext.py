@@ -94,10 +94,13 @@ class PilotToArucoMarker(PilotToPose):
                 self._world_pose_from_marker(markers[self.marker_id])
             )
         else:
-            # Spine not in the current frame (motion blur, angle, timing) but SLAM may
-            # still have a visible BookObj — navigate to the map pose like PilotToPose(WorldObject).
+            # Spine not in this detector snapshot (motion blur, angle, timing) but the world
+            # map pose may still be good. ``WorldMap.update_visibilities()`` sets
+            # ``BookObj.is_visible = False`` for every object not in ``updated_objects`` that
+            # frame — so markers that fail one decode cycle look "off map" even though SLAM kept
+            # the pose fresh. Fallback on BookObj pose when still ``not is_missing``.
             map_obj = self._world_object_for_marker_id()
-            if isinstance(map_obj, BookObj) and map_obj.is_visible:
+            if isinstance(map_obj, BookObj) and not map_obj.is_missing:
                 print(
                     f"PilotToArucoMarker: marker {self.marker_id} not in snapshot; "
                     "using BookObj map pose"
@@ -109,9 +112,14 @@ class PilotToArucoMarker(PilotToPose):
                     Pose(float(bp.x), float(bp.y), z, nan)
                 )
             else:
+                diag = (
+                    "nothing on map for this marker"
+                    if map_obj is None
+                    else f"type={type(map_obj).__name__} missing={getattr(map_obj, 'is_missing', None)}"
+                )
                 print(
-                    f"PilotToArucoMarker: marker id {self.marker_id} not in view "
-                    f"and no visible BookObj on map"
+                    f"PilotToArucoMarker: marker id {self.marker_id} not in snapshot "
+                    f"and no usable BookObj map pose ({diag})"
                 )
                 self.punt_super_start()
                 self.post_failure()

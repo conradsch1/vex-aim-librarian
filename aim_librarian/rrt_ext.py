@@ -29,13 +29,16 @@ def generate_book_obstacle(book, inflation=0):
     from aim_fsm.rrt_shapes import Rectangle
 
     # Match librarian WorldMapView.qml: books use +90° yaw on the marker delegate (tagOnSpine).
+    th = book.pose.theta
+    if th is None:
+        th = 0.0
     r = Rectangle(
         center=geometry.point(book.pose.x, book.pose.y),
         dimensions=[
             BookObj.SPINE_THICKNESS_MM + 2 * inflation,
             BookObj.COVER_WIDTH_MM + 2 * inflation,
         ],
-        orient=wrap_angle(book.pose.theta + pi / 2),
+        orient=wrap_angle(th + pi / 2),
     )
     r.obstacle_id = book.id
     return r
@@ -60,7 +63,7 @@ def _librarian_generate_obstacles(self, goal_object, obstacle_inflation=0, wall_
         elif isinstance(obj, ArucoMarkerObj):
             obst = self.generate_aruco_obstacle(obj, obstacle_inflation)
         elif isinstance(obj, BookObj):
-            obst = generate_book_obstacle(obj, obstacle_inflation)
+            obst = generate_book_obstacle(obj, BookObj.RRT_OBSTACLE_INFLATION_MM)
         elif isinstance(obj, DoorwayObj):
             obst = None
         else:

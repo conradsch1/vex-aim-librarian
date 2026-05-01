@@ -65,6 +65,25 @@ class DetachBookAtPose(StateNode):
         self.post_completion()
 
 
+class ClearBookHolding(StateNode):
+    """Clear ``robot.holding`` when it is a :class:`BookObj` (and ``held_by``).
+
+    Stock :meth:`WorldMap.confirm_still_holding` does not time-out magnet-held books; use
+    this after a kicker knock-off (``#getbook`` patron hand-off) or as a safety net after
+    shelving kick when software state should match ``holding == None``.
+    """
+
+    def start(self, event=None):
+        super().start(event)
+        held = self.robot.holding
+        if isinstance(held, BookObj):
+            mid = held.marker_id
+            held.held_by = None
+            self.robot.holding = None
+            print(f"ClearBookHolding: cleared Book-{mid} from magnet holding state")
+        self.post_completion()
+
+
 class WaitUntilBookRemoved(StateNode):
     """Poll ArUco vision until the book spine id stays out of view; then clear ``robot.holding``.
 
@@ -131,4 +150,4 @@ class WaitUntilBookRemoved(StateNode):
         super().stop()
 
 
-__all__ = ["AttachBook", "DetachBookAtPose", "WaitUntilBookRemoved"]
+__all__ = ["AttachBook", "ClearBookHolding", "DetachBookAtPose", "WaitUntilBookRemoved"]
